@@ -162,6 +162,13 @@ def _starter_probability(players: pd.DataFrame) -> pd.Series:
     prob = (prob * clamp).clip(0.0, 1.0)
     return pd.Series(prob, index=df.index)
 
+# inside projections.py, near the top of expected_points_next_gw
+try:
+    from .odds_adapter_free import fetch_match_odds
+    odds = fetch_match_odds(teams[["team_id","team_name"]])
+except Exception:
+    odds = pd.DataFrame()
+
 # ---------- main ----------
 def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame) -> pd.DataFrame:
     team_strength = normalize_team_strength(teams)
