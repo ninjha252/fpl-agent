@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # --- Path fix so imports work on Streamlit Cloud ---
-import os, sys
+import os, sys, time
 ROOT = os.path.dirname(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -18,6 +18,8 @@ from src.fpl_agent.utils import SquadRules
 from src.fpl_agent import projections as proj_mod
 from src.fpl_agent import news_state
 from src.fpl_agent.news_signals import build_buzz_map
+# Free odds adapter (no API keys)
+from src.fpl_agent.odds_adapter_free import fetch_match_odds as fetch_odds_free
 
 # ---------------- UI CONFIG ----------------
 st.set_page_config(page_title="FPL AI Agent", layout="wide")
@@ -35,7 +37,7 @@ with st.sidebar:
 
     st.markdown("### Form & Odds")
     form_n = st.slider("Form lookback (games)", 3, 10, 6, 1)
-    odds_on = st.checkbox("Use bookmaker odds (needs ODDS_API_KEY)", value=False)
+    odds_on = st.checkbox("Use FREE bookmaker odds (experimental)", value=True)
     odds_w = st.slider("Odds weight", 0.0, 1.5, 0.6, 0.05)
 
     st.markdown("### News & Buzz")
@@ -48,7 +50,7 @@ with st.sidebar:
     subs = [s.strip() for s in subs_text.split(",") if s.strip()]
 
 st.info(
-    "Projections use official FPL data + starter probability, team form, optional odds & news buzz. "
+    "Projections use official FPL data + starter probability, team form, optional FREE odds & news buzz. "
     "XI obeys FPL rules (1 GK, ≥3 DEF, ≥3 MID, ≥1 FWD)."
 )
 
@@ -68,10 +70,6 @@ proj_mod.NEWS_BUZZ_WEIGHT = buzz_weight
 for name in [n.strip() for n in manual_backups.split(",") if n.strip()]:
     proj_mod.set_manual_role_override(name, "backup")
 
-# Pass ODDS_API_KEY from secrets to env so odds_adapter can see it
-if odds_on and "odds" in st.secrets and "api_key" in st.secrets["odds"]:
-    os.environ["ODDS_API_KEY"] = st.secrets["odds"]["api_key"]
-
 # Build news buzz map (optional)
 news_state.BUZZ = {}
 if use_buzz:
@@ -79,10 +77,24 @@ if use_buzz:
     names = players["web_name"].astype(str).tolist()
     news_state.BUZZ = build_buzz_map(st.secrets, names, reddit_subs=subs)
 
+# ---------------- OPTIONAL: FREE ODDS (pre-fetch for projections) ----------------
+# If odds_on, we preload team-level win probs and stash in session for projections to read via merge.
+if odds_on:
+    with st.spinner("Fetching free odds (best-effort)…"):
+        try:
+            st.session_state["_free_odds_df"] = fetch_odds_free(teams[["team_id","team_name"]])
+        except Exception:
+            st.session_state["_free_odds_df"] = pd.DataFrame()
+else:
+    st.session_state["_free_odds_df"] = pd.DataFrame()
+
 # ---------------- PROJECTIONS ----------------
 proj = expected_points_next_gw(players, teams, fixtures)
+# Merge free odds if available (so they show up in the table even if projections already used them)
+if isinstance(st.session_state.get("_free_odds_df"), pd.DataFrame) and not st.session_state["_free_odds_df"].empty:
+    proj = proj.merge(st.session_state["_free_odds_df"], on="team_name", how="left")
+
 if hide_thresh > 0:
-    # Filter extreme backups out of the table view
     sp = proj.get("starter_prob", 1.0)
     proj = proj[sp >= hide_thresh].copy()
 
@@ -90,11 +102,41 @@ if hide_thresh > 0:
 def safe_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
     return [c for c in cols if c in df.columns]
 
+# ---------------- PLAYER SEARCH (with free-odds lookup) ----------------
+with st.expander("🔎 Search players / teams"):
+    q = st.text_input("Type a player or team name")
+    if q.strip():
+        ql = q.lower()
+        mask = (
+            proj["web_name"].astype(str).str.lower().str.contains(ql, na=False)
+            | proj.get("team_name", pd.Series("", index=proj.index)).astype(str).str.lower().str.contains(ql, na=False)
+        )
+        res = proj.loc[mask].sort_values("xPts", ascending=False)
+        st.dataframe(
+            res[safe_cols(res, ["player_id","web_name","position","team_name","cost","starter_prob","win_prob","xPts"])].head(100),
+            use_container_width=True
+        )
+
+        # Free odds for that player's team (best-effort scrape)
+        if st.button("Fetch free odds for this search"):
+            with st.spinner("Searching free odds…"):
+                try:
+                    # use first matching team name
+                    team = res["team_name"].dropna().astype(str).iloc[0]
+                    odd_df = fetch_odds_free(pd.DataFrame({"team_name":[team]}))
+                    if odd_df is not None and not odd_df.empty:
+                        st.success("Found odds (implied probabilities):")
+                        st.table(odd_df)
+                    else:
+                        st.info("No odds found from free sources right now.")
+                except Exception as e:
+                    st.info("No odds found from free sources right now.")
+
+# ---------------- MAIN TABLE ----------------
 display_cols = safe_cols(
     proj,
-    ["player_id", "web_name", "position", "team_name", "cost", "starter_prob", "buzz", "xPts"]
+    ["player_id", "web_name", "position", "team_name", "cost", "starter_prob", "win_prob", "buzz", "xPts"]
 )
-
 st.subheader("Projected points (next GW)")
 st.dataframe(
     proj.sort_values("xPts", ascending=False)[display_cols].head(50),
@@ -108,7 +150,6 @@ opt = SquadOptimizer(rules)
 if build_mode == "Build initial 15":
     st.subheader("Initial Squad Builder")
     pool = proj.copy()
-    # Drop players ruled out/injured for sanity
     if "status" in pool.columns:
         pool = pool[~pool.status.isin(["i", "o"])].copy()
 
@@ -169,7 +210,6 @@ else:
 st.divider()
 st.markdown(
     "#### Notes\n"
-    "- Backups (esp GK) get penalized; use **Manual backups** box to force known backups.\n"
-    "- Toggle **Buzz** to include Reddit/RSS sentiment; add your subs in the sidebar.\n"
-    "- **Odds** require an API key; set `odds.api_key` in Streamlit Secrets.\n"
+    "- Free odds scrapes can fail near kickoff; the app just falls back gracefully.\n"
+    "- Use the search box to filter players and quickly fetch free odds for their team.\n"
 )
