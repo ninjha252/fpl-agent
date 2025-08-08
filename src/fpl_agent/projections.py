@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from typing import Dict
 
-# ==== knobs (tweak from UI via setters) ====
+# ==== knobs (set from Streamlit) ====
 NAILEDNESS_SCALE: float = 1.0
 STARTER_HIDE_THRESHOLD: float = 0.35
 GK_BACKUP_MULT: float = 0.10
 BACKUP_MULT: float = 0.25
 NEWS_BUZZ_WEIGHT: float = 0.5
+FORM_LOOKBACK: int = 6         # last N fixtures
+ODDS_WEIGHT: float = 0.6       # weight on odds signals
 
-# Manual overrides
-MANUAL_ROLE_OVERRIDES: Dict[str, str] = {
-    "Arrizabalaga": "backup",
-    "Kepa": "backup",
-}
+MANUAL_ROLE_OVERRIDES: Dict[str, str] = {"Arrizabalaga":"backup","Kepa":"backup"}
 
 ROLE_W = {"GK": 0.65, "DEF": 0.80, "MID": 1.00, "FWD": 1.05}
 TEAM_KEYS = [
@@ -23,19 +21,16 @@ TEAM_KEYS = [
     "strength_defence_home", "strength_defence_away",
 ]
 
-def set_nailedness_scale(v: float):
-    global NAILEDNESS_SCALE
-    NAILEDNESS_SCALE = float(v)
-
+def set_nailedness_scale(v: float):    # UI accessors
+    global NAILEDNESS_SCALE; NAILEDNESS_SCALE = float(v)
 def set_starter_hide_threshold(v: float):
-    global STARTER_HIDE_THRESHOLD
-    STARTER_HIDE_THRESHOLD = float(v)
-
+    global STARTER_HIDE_THRESHOLD; STARTER_HIDE_THRESHOLD = float(v)
 def set_manual_role_override(name: str, role: str):
-    key = str(name).strip()
-    if not key:
-        return
-    MANUAL_ROLE_OVERRIDES[key] = role.lower().strip()
+    if name: MANUAL_ROLE_OVERRIDES[str(name).strip()] = role.lower().strip()
+def set_form_lookback(n: int):
+    global FORM_LOOKBACK; FORM_LOOKBACK = int(n)
+def set_odds_weight(w: float):
+    global ODDS_WEIGHT; ODDS_WEIGHT = float(w)
 
 # ---------- helpers ----------
 def make_fixture_table(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame) -> pd.DataFrame:
@@ -57,14 +52,53 @@ def normalize_team_strength(teams: pd.DataFrame) -> pd.DataFrame:
         st[k] = (st[k] - mu) / sd
     return st
 
+def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: int) -> pd.DataFrame:
+    """Compute rolling form: goals for/against, points per game, clean-sheet rate."""
+    # Only finished fixtures
+    fx = fixtures.copy()
+    if "finished" in fx.columns:
+        fx = fx[fx["finished"] == True]
+    cols = ["team_h","team_a","team_h_score","team_a_score","event"]
+    for c in cols:
+        if c not in fx.columns:  # old-season safety
+            return pd.DataFrame({"team_id": teams["team_id"], "form_ppg":0.0,"form_gf":0.0,"form_ga":0.0,"form_cs":0.0})
+
+    rows = []
+    for _, m in fx.iterrows():
+        h = int(m["team_h"]); a = int(m["team_a"])
+        hs = int(m.get("team_h_score",0) or 0); as_ = int(m.get("team_a_score",0) or 0)
+        # points
+        if hs > as_: h_pts, a_pts = 3, 0
+        elif hs < as_: h_pts, a_pts = 0, 3
+        else: h_pts, a_pts = 1, 1
+        rows.append({"team_id":h, "gf":hs, "ga":as_, "pts":h_pts, "cs":1 if as_==0 else 0})
+        rows.append({"team_id":a, "gf":as_, "ga":hs, "pts":a_pts, "cs":1 if hs==0 else 0})
+
+    df = pd.DataFrame(rows)
+    df["n"] = 1
+    df = df.groupby("team_id", as_index=False).rolling(lookback, min_periods=1, on=None).sum()
+    # the above rolling on grouped is messy; simpler:
+    grp = pd.DataFrame(rows).groupby("team_id")
+    feats = []
+    for tid, g in grp:
+        g = g.tail(lookback)
+        n = max(len(g),1)
+        feats.append({
+            "team_id": tid,
+            "form_ppg": g["pts"].sum()/n,
+            "form_gf": g["gf"].sum()/n,
+            "form_ga": g["ga"].sum()/n,
+            "form_cs": g["cs"].sum()/n,
+        })
+    return pd.DataFrame(feats)
+
 # ---------- starter logic ----------
 def _first_choice_gk_flags(players: pd.DataFrame) -> pd.Series:
     cols = ["player_id", "team_id", "cost", "minutes", "selected_by_percent"]
     gk = players[players["position"] == "GK"][cols].copy()
     gk["minutes"] = pd.to_numeric(gk.get("minutes", 0), errors="coerce").fillna(0.0)
     gk["selected_by_percent"] = pd.to_numeric(gk.get("selected_by_percent", 0), errors="coerce").fillna(0.0)
-    gk = gk.sort_values(["team_id", "minutes", "selected_by_percent", "cost"],
-                        ascending=[True, False, False, False]).copy()
+    gk = gk.sort_values(["team_id","minutes","selected_by_percent","cost"], ascending=[True,False,False,False])
     gk["rank"] = gk.groupby("team_id").cumcount()
     first_flags = (gk["rank"] == 0).astype(float)
     return first_flags.reindex(players["player_id"]).fillna(0.0)
@@ -96,20 +130,20 @@ def _starter_probability(players: pd.DataFrame) -> pd.Series:
     is_manual_starter = (manual == "starter").astype(float)
 
     status = df.get("status", "a").astype(str)
-    bad_status = status.isin(["i", "o", "n", "s"]).astype(float)
+    bad_status = status.isin(["i","o","n","s"]).astype(float)
     clamp = 1.0 - 0.85 * bad_status
 
     prob = (0.55 * base + 0.35 * nailed + gk_adj).clip(0.0, 1.0)
     prob = np.where(is_manual_backup > 0, np.minimum(prob, 0.10), prob)
     prob = np.where(is_manual_starter > 0, np.maximum(prob, 0.80), prob)
     prob = (prob * clamp).clip(0.0, 1.0)
-
     return pd.Series(prob, index=df.index)
 
-# ---------- main projections ----------
+# ---------- main ----------
 def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame) -> pd.DataFrame:
     team_strength = normalize_team_strength(teams)
     fx_tbl = make_fixture_table(players, teams, fixtures)
+    form = team_form_features(fixtures, teams, FORM_LOOKBACK)
 
     df = players[[
         "player_id","web_name","position","cost","team_id","minutes",
@@ -117,11 +151,21 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     ]].copy()
     df = df.merge(team_strength, on="team_id", how="left")
     df = df.merge(fx_tbl, on="team_id", how="left")
+    df = df.merge(form, on="team_id", how="left")
 
     opp_strength = team_strength.add_suffix("_opp").rename(columns={"team_id_opp": "opp_id"})
     df = df.merge(opp_strength, on="opp_id", how="left")
 
-    # starter prob (as minutes factor)
+    # Optional bookmaker odds
+    try:
+        from .odds_adapter import fetch_match_odds
+        odds = fetch_match_odds(teams[["team_id","team_name"]])
+    except Exception:
+        odds = pd.DataFrame()
+    if isinstance(odds, pd.DataFrame) and not odds.empty:
+        df = df.merge(odds, on="team_name", how="left")
+
+    # starter minutes factor
     starter_prob = _starter_probability(df)
     minutes_factor = starter_prob
 
@@ -139,17 +183,35 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     opp_att = df[["strength_attack_home_opp", "strength_attack_away_opp"]].mean(axis=1)
     cs_proxy = (team_def - opp_att).clip(-2, 2) * df["position"].isin(["GK","DEF"]).astype(float)
 
+    # form features (scaled)
+    form_ppg = df["form_ppg"].fillna(df["form_ppg"].mean() if "form_ppg" in df else 0.0)
+    form_gf  = df.get("form_gf", pd.Series(0, index=df.index)).fillna(0.0)
+    form_ga  = df.get("form_ga", pd.Series(0, index=df.index)).fillna(0.0)
+    form_cs  = df.get("form_cs", pd.Series(0, index=df.index)).fillna(0.0)
+    form_adj = 0.4*form_ppg + 0.3*(form_gf - form_ga) + 0.3*form_cs
+
+    # odds features (if present)
+    win_prob   = df.get("win_prob", pd.Series(0, index=df.index)).fillna(0.0)
+    over25_prob= df.get("over25_prob", pd.Series(0, index=df.index)).fillna(0.0)
+    odds_adj = ODDS_WEIGHT * (0.7*win_prob + 0.3*over25_prob)
+
     sel = pd.to_numeric(df["selected_by_percent"], errors="coerce").fillna(0.0)
     sel_norm = (sel - sel.min()) / ((sel.max() - sel.min()) or 1.0)
     bonus_proxy = 0.1 * sel_norm
 
-    xpts = minutes_factor * (role_w * (0.9 * ict_z) + 0.6 * fixture_adj + 0.4 * cs_proxy + bonus_proxy)
+    xpts = minutes_factor * (
+        role_w * (0.8 * ict_z) +
+        0.5 * fixture_adj +
+        0.35 * cs_proxy +
+        0.35 * form_adj +
+        odds_adj +
+        bonus_proxy
+    )
     xpts = 4.0 + 2.0 * xpts
 
     out = df[["player_id","web_name","position","team_id","cost","status"]].copy()
     out["starter_prob"] = starter_prob.clip(0.0, 1.0)
 
-    # demote backups
     is_gk = out["position"].eq("GK")
     gk_backup_mask = is_gk & (out["starter_prob"] < 0.5)
     of_backup_mask = ~is_gk & (out["starter_prob"] < 0.35)
@@ -157,10 +219,6 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     xpts = np.where(of_backup_mask, xpts * BACKUP_MULT, xpts)
     out["xPts"] = np.maximum(xpts, 0.0)
 
-    # manual role string for UI
-    out["manual_role"] = out["web_name"].map(lambda n: MANUAL_ROLE_OVERRIDES.get(str(n), ""))
-
-    # attach team_name for display
     if "team_name" in teams.columns:
         out = out.merge(teams[["team_id","team_name"]], on="team_id", how="left")
 
