@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-# --- add src/ to path so we can import our package on Streamlit Cloud ---
 import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+# Add the *src* folder to Python's search path
+current_dir = os.path.dirname(__file__)
+src_path = os.path.join(current_dir, "src")
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
 
 import streamlit as st
 import pandas as pd
@@ -11,6 +14,7 @@ from fpl_agent.data import load_bootstrap, load_fixtures
 from fpl_agent.projections import expected_points_next_gw
 from fpl_agent.optimizer import SquadOptimizer
 from fpl_agent.utils import SquadRules
+
 
 
 st.set_page_config(page_title="FPL AI Agent", layout="wide")
