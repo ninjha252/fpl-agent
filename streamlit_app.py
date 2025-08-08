@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import os, sys
-# Add the *src* folder to Python's search path
-current_dir = os.path.dirname(__file__)
-src_path = os.path.join(current_dir, "src")
-if src_path not in sys.path:
-    sys.path.insert(0, src_path)
+ROOT = os.path.dirname(__file__)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 import streamlit as st
 import pandas as pd
 
-from fpl_agent.data import load_bootstrap, load_fixtures
-from fpl_agent.projections import expected_points_next_gw
-from fpl_agent.optimizer import SquadOptimizer
-from fpl_agent.utils import SquadRules
+from src.fpl_agent.data import load_bootstrap, load_fixtures
+from src.fpl_agent.projections import expected_points_next_gw
+from src.fpl_agent.optimizer import SquadOptimizer
+from src.fpl_agent.utils import SquadRules
 
 
 
