@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os, sys
-# Put repo root (contains "src") on path
+# Put repo root (contains "src") on path so imports work on Streamlit Cloud
 ROOT = os.path.dirname(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -42,7 +42,7 @@ with st.spinner("Loading FPL data..."):
     players, teams, events = load_bootstrap()
     fixtures = load_fixtures()
 
-# Apply knobs
+# Apply knobs to projection module
 proj_mod.set_nailedness_scale(nailedness)
 proj_mod.set_starter_hide_threshold(hide_thresh)
 proj_mod.NEWS_BUZZ_WEIGHT = buzz_weight
@@ -60,46 +60,59 @@ if use_buzz:
     reddit = fetch_reddit_buzz(st.secrets, names) if "reddit" in st.secrets else {}
     news_state.BUZZ = combine_buzz(reddit, rss)
 
-# Projections
+# Compute projections
 proj = expected_points_next_gw(players, teams, fixtures)
 if hide_thresh > 0:
-    proj = proj[proj["starter_prob"] >= hide_thresh].copy()
+    proj = proj[proj.get("starter_prob", 1.0) >= hide_thresh].copy()
+
+# ---- Safe column selection (prevents KeyError) ----
+def safe_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
+    return [c for c in cols if c in df.columns]
+
+display_cols = safe_cols(
+    proj,
+    ["player_id", "web_name", "position", "team_name", "cost", "starter_prob", "buzz", "xPts"]
+)
 
 st.subheader("Projected points (next GW)")
 st.dataframe(
-    proj.sort_values("xPts", ascending=False)[
-        ["player_id","web_name","position","team_name","cost","starter_prob","buzz","xPts"]
-    ].head(50),
+    proj.sort_values("xPts", ascending=False)[display_cols].head(50),
     use_container_width=True
 )
 
+# -------- Squad builder / optimizer --------
 rules = SquadRules(budget=budget)
 opt = SquadOptimizer(rules)
 
 if build_mode == "Build initial 15":
     st.subheader("Initial Squad Builder")
     pool = proj.copy()
-    pool = pool[~pool.status.isin(["i", "o"])].copy()
+    # Drop players marked out/injured for initial squad sanity
+    if "status" in pool.columns:
+        pool = pool[~pool.status.isin(["i", "o"])].copy()
 
     if st.button("Build Squad"):
         res = opt.pick_initial_squad(pool)
         chosen = proj.merge(pd.DataFrame({"player_id": res["squad15"]}), on="player_id")
         xi = chosen[chosen.player_id.isin(res["xi"])].copy()
         bench = chosen[chosen.player_id.isin(res["bench"])].copy()
-        cap = chosen[chosen.player_id==res["captain"]].iloc[0]
-        vice = chosen[chosen.player_id==res["vice"]].iloc[0]
+        cap = chosen[chosen.player_id == res["captain"]].iloc[0]
+        vice = chosen[chosen.player_id == res["vice"]].iloc[0]
 
-        xi = xi.sort_values(["team_name","xPts"], ascending=[True, False])
-        bench = bench.sort_values(["team_name","xPts"], ascending=[True, False])
+        xi = xi.sort_values(["team_name", "xPts"], ascending=[True, False])
+        bench = bench.sort_values(["team_name", "xPts"], ascending=[True, False])
+
+        xi_cols = safe_cols(xi, ["web_name", "position", "team_name", "cost", "xPts"])
+        bench_cols = safe_cols(bench, ["web_name", "position", "team_name", "cost", "xPts"])
 
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("### Starting XI + C/VC")
-            st.dataframe(xi[["web_name","position","team_name","cost","xPts"]], use_container_width=True)
+            st.dataframe(xi[xi_cols], use_container_width=True)
             st.success(f"Captain: {cap.web_name} | Vice: {vice.web_name}")
         with col2:
             st.markdown("### Bench")
-            st.dataframe(bench[["web_name","position","team_name","cost","xPts"]], use_container_width=True)
+            st.dataframe(bench[bench_cols], use_container_width=True)
 
 else:
     st.subheader("Optimize my 15 (paste current squad)")
@@ -114,20 +127,23 @@ else:
             xi, bench, captain, vice = opt._pick_xi_captain(chosen)
             xi_df = chosen[chosen.player_id.isin(xi)]
             bench_df = chosen[chosen.player_id.isin(bench)]
-            cap = chosen[chosen.player_id==captain].iloc[0]
-            v = chosen[chosen.player_id==vice].iloc[0]
+            cap = chosen[chosen.player_id == captain].iloc[0]
+            v = chosen[chosen.player_id == vice].iloc[0]
 
-            xi_df = xi_df.sort_values(["team_name","xPts"], ascending=[True, False])
-            bench_df = bench_df.sort_values(["team_name","xPts"], ascending=[True, False])
+            xi_df = xi_df.sort_values(["team_name", "xPts"], ascending=[True, False])
+            bench_df = bench_df.sort_values(["team_name", "xPts"], ascending=[True, False])
+
+            xi_cols = safe_cols(xi_df, ["web_name", "position", "team_name", "cost", "xPts"])
+            bench_cols = safe_cols(bench_df, ["web_name", "position", "team_name", "cost", "xPts"])
 
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("### Starting XI + C/VC")
-                st.dataframe(xi_df[["web_name","position","team_name","cost","xPts"]], use_container_width=True)
+                st.dataframe(xi_df[xi_cols], use_container_width=True)
                 st.success(f"Captain: {cap.web_name} | Vice: {v.web_name}")
             with col2:
                 st.markdown("### Bench")
-                st.dataframe(bench_df[["web_name","position","team_name","cost","xPts"]], use_container_width=True)
+                st.dataframe(bench_df[bench_cols], use_container_width=True)
         except Exception as e:
             st.error(str(e))
 
