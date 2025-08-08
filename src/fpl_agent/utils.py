@@ -6,8 +6,8 @@ POSITION_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
 @dataclass
 class SquadRules:
-    budget: float = 100.0  # initial build
-    bank: float = 0.0      # weekly bank override
+    budget: float = 100.0
+    bank: float = 0.0
     max_from_team: int = 3
     gk: int = 2
     df: int = 5
@@ -28,4 +28,3 @@ class PlanningKnobs:
     risk: str = "medium"
 
 TEAM_ID_TO_NAME: Dict[int, str] = {}
-# utils.py placeholder
