@@ -1,7 +1,7 @@
 from __future__ import annotations
 import pulp as pl
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 from .utils import SquadRules
 
@@ -67,7 +67,6 @@ def _repair_xi_to_formation(xi: List[int], all_ids: List[int],
                             pos_map: Dict[int, str], xpts: Dict[int, float]) -> List[int]:
     """Safe repair: enforce 1 GK, DEF>=3, MID>=3, FWD>=1, total=11 without shrinking below 11."""
     xi = list(dict.fromkeys(xi))
-    # Pad to 11 if short
     if len(xi) < 11:
         for i in sorted(all_ids, key=lambda j: xpts[j], reverse=True):
             if i not in xi:
@@ -126,7 +125,6 @@ def _repair_xi_to_formation(xi: List[int], all_ids: List[int],
     raise_min("MID", 3)
     raise_min("FWD", 1)
 
-    # pad back to 11 if any weirdness
     while len(xi) < 11:
         add = next((i for i in sorted_ids if i not in xi and not (pos_map[i] == "GK" and counts["GK"] >= 1)), None)
         if add is None: break
@@ -139,7 +137,6 @@ def _repair_xi_to_formation(xi: List[int], all_ids: List[int],
 
     return xi
 
-# --------- main optimizer ---------
 class SquadOptimizer:
     def __init__(self, rules: SquadRules):
         self.rules = rules
@@ -200,7 +197,7 @@ class SquadOptimizer:
         prob += pl.lpSum([s[i] for i in ids if pos_map[i] == "FWD"]) >= 1
         prob += pl.lpSum([c[i] for i in ids]) == 1
         prob += pl.lpSum([v[i] for i in ids]) == 1
-        for i in ids: 
+        for i in ids:
             prob += c[i] <= s[i]
             prob += v[i] <= s[i]
 
@@ -210,7 +207,8 @@ class SquadOptimizer:
         if len(xi) != 11:
             xi = []
             for i in sorted(ids, key=lambda j: xpts[j], reverse=True):
-                if len(xi) < 11: xi.append(i)
+                if len(xi) < 11:
+                    xi.append(i)
 
         xi = _repair_xi_to_formation(xi, ids, pos_map, xpts)
         bench = [i for i in ids if i not in xi]
@@ -224,7 +222,7 @@ class SquadOptimizer:
         xi, _, cap, _ = self._pick_xi_captain(squad_df)
         x = squad_df[squad_df.player_id.isin(xi)]["xPts"].sum()
         xc = float(squad_df.loc[squad_df.player_id == cap, "xPts"].iloc[0])
-        return float(x + xc)  # captain roughly adds one more xPts (not exact but useful)
+        return float(x + xc)  # rough captain boost
 
     def suggest_transfers(
         self,
@@ -247,7 +245,6 @@ class SquadOptimizer:
         if len(squad) != 15:
             raise ValueError("Provide exactly 15 players from your current squad.")
 
-        # track budget / team counts
         team_counts = squad["team_id"].value_counts().to_dict()
         have_ids = set(squad["player_id"].tolist())
         base_pts = self._xi_points(squad)
@@ -260,14 +257,12 @@ class SquadOptimizer:
             best = None
             best_gain = 0.0
 
-            # search same-position swaps only (keeps 15-man composition)
             for _, row_out in squad.iterrows():
                 pos = row_out["position"]
                 out_id = int(row_out["player_id"])
                 out_team = int(row_out["team_id"])
                 out_cost = float(row_out["cost"])
 
-                # candidates not already owned
                 candidates = pool[(pool["position"] == pos) & (~pool["player_id"].isin(have_ids))] \
                                 .sort_values("xPts", ascending=False).head(80)
 
@@ -276,22 +271,19 @@ class SquadOptimizer:
                     in_team = int(row_in["team_id"])
                     in_cost = float(row_in["cost"])
 
-                    # team cap
                     next_count_in = team_counts.get(in_team, 0) + (0 if in_team == out_team else 1)
-                    next_count_out = team_counts.get(out_team, 0) - (0 if in_team == out_team else 1)
                     if next_count_in > team_cap:
                         continue
-                    if next_count_out < 0:
-                        continue
 
-                    # budget: bank + out_cost - in_cost >= 0
                     if remaining_bank + out_cost - in_cost < -1e-9:
                         continue
 
-                    # try swap and compute net gain
                     tmp = squad.copy()
-                    tmp.loc[tmp.player_id == out_id, ["player_id","team_id","cost","xPts","position"]] = \
-                        [in_id, in_team, in_cost, float(row_in["xPts"]), pos]
+                    tmp.loc[tmp.player_id == out_id, ["player_id","team_id","cost","xPts","position","web_name","team_name"]] = [
+                        in_id, in_team, in_cost, float(row_in["xPts"]), pos,
+                        str(row_in.get("web_name", in_id)),
+                        str(row_in.get("team_name", in_team)),
+                    ]
 
                     try:
                         new_pts = self._xi_points(tmp)
@@ -316,9 +308,8 @@ class SquadOptimizer:
                         }
 
             if not best or best_gain <= 0:
-                break  # no profitable swap
+                break
 
-            # apply best swap
             changes += 1
             remaining_bank -= best["cost_diff"]
             base_pts = float(best["new_pts"])
@@ -328,15 +319,14 @@ class SquadOptimizer:
             if best["in_team"] != best["out_team"]:
                 team_counts[best["out_team"]] = team_counts.get(best["out_team"], 1) - 1
 
-            # update squad dataframe
-            squad.loc[squad.player_id == best["out_id"], ["player_id","team_id","cost","xPts","position","web_name","team_name"]] = \
-                [best["in_id"], best["in_team"],
-                 float(pool.loc[pool.player_id == best["in_id"], "cost"].iloc[0]),
-                 float(pool.loc[pool.player_id == best["in_id"], "xPts"].iloc[0]),
-                 str(pool.loc[pool.player_id == best["in_id"], "position"].iloc[0]),
-                 str(pool.loc[pool.player_id == best["in_id"], "web_name"].iloc[0]) if "web_name" in pool.columns else str(best["in_id"]),
-                 str(pool.loc[pool.player_id == best["in_id"], "team_name"].iloc[0]) if "team_name" in pool.columns else str(best["in_team"]),
-                ]
+            squad.loc[squad.player_id == best["out_id"], ["player_id","team_id","cost","xPts","position","web_name","team_name"]] = [
+                best["in_id"], best["in_team"],
+                float(pool.loc[pool.player_id == best["in_id"], "cost"].iloc[0]),
+                float(pool.loc[pool.player_id == best["in_id"], "xPts"].iloc[0]),
+                str(pool.loc[pool.player_id == best["in_id"], "position"].iloc[0]),
+                str(pool.loc[pool.player_id == best["in_id"], "web_name"].iloc[0]) if "web_name" in pool.columns else str(best["in_id"]),
+                str(pool.loc[pool.player_id == best["in_id"], "team_name"].iloc[0]) if "team_name" in pool.columns else str(best["in_team"]),
+            ]
 
             suggestions.append(best)
 
