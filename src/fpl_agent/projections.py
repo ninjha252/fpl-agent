@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from typing import Dict
 
-# ==== knobs you can tweak from streamlit (we'll import and set at runtime) ====
+# ==== knobs (tweak from UI via setters) ====
 NAILEDNESS_SCALE: float = 1.0
-STARTER_HIDE_THRESHOLD: float = 0.35  # if you want to hide extreme backups in UI
-GK_BACKUP_MULT: float = 0.10          # xPts multiplier for backup GK
-BACKUP_MULT: float = 0.25             # xPts multiplier for non-starter outfield
+STARTER_HIDE_THRESHOLD: float = 0.35
+GK_BACKUP_MULT: float = 0.10
+BACKUP_MULT: float = 0.25
+NEWS_BUZZ_WEIGHT: float = 0.5
 
-# Manual role overrides (use web_name as keys; case-insensitive match)
-# 'starter' -> boost, 'backup' -> punish hard
+# Manual overrides
 MANUAL_ROLE_OVERRIDES: Dict[str, str] = {
-    # Example: Arrizabalaga is backup at Arsenal behind Raya
     "Arrizabalaga": "backup",
+    "Kepa": "backup",
 }
 
-# ===== existing weights =====
 ROLE_W = {"GK": 0.65, "DEF": 0.80, "MID": 1.00, "FWD": 1.05}
 TEAM_KEYS = [
     "strength_overall_home", "strength_overall_away",
@@ -24,7 +23,7 @@ TEAM_KEYS = [
     "strength_defence_home", "strength_defence_away",
 ]
 
-def set_nailedness_scale(v: float):     # optional UI control
+def set_nailedness_scale(v: float):
     global NAILEDNESS_SCALE
     NAILEDNESS_SCALE = float(v)
 
@@ -32,13 +31,13 @@ def set_starter_hide_threshold(v: float):
     global STARTER_HIDE_THRESHOLD
     STARTER_HIDE_THRESHOLD = float(v)
 
-def set_manual_role_override(name: str, role: str):  # quick API if you want UI later
+def set_manual_role_override(name: str, role: str):
     key = str(name).strip()
     if not key:
         return
     MANUAL_ROLE_OVERRIDES[key] = role.lower().strip()
 
-# ---------- fixture helpers ----------
+# ---------- helpers ----------
 def make_fixture_table(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame) -> pd.DataFrame:
     if "event" in fixtures.columns and fixtures["event"].notna().any():
         next_event = int(fixtures["event"].dropna().min())
@@ -60,29 +59,20 @@ def normalize_team_strength(teams: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- starter logic ----------
 def _first_choice_gk_flags(players: pd.DataFrame) -> pd.Series:
-    """Flag likely #1 GK per team using season minutes (tie-break cost)."""
-    gk = players[players["position"] == "GK"][["player_id", "team_id", "cost", "minutes"]].copy()
-    if "minutes" not in gk.columns:
-        gk["minutes"] = 0
-    gk = gk.sort_values(["team_id", "minutes", "cost"], ascending=[True, False, False]).copy()
+    cols = ["player_id", "team_id", "cost", "minutes", "selected_by_percent"]
+    gk = players[players["position"] == "GK"][cols].copy()
+    gk["minutes"] = pd.to_numeric(gk.get("minutes", 0), errors="coerce").fillna(0.0)
+    gk["selected_by_percent"] = pd.to_numeric(gk.get("selected_by_percent", 0), errors="coerce").fillna(0.0)
+    gk = gk.sort_values(["team_id", "minutes", "selected_by_percent", "cost"],
+                        ascending=[True, False, False, False]).copy()
     gk["rank"] = gk.groupby("team_id").cumcount()
     first_flags = (gk["rank"] == 0).astype(float)
     return first_flags.reindex(players["player_id"]).fillna(0.0)
 
 def _starter_probability(players: pd.DataFrame) -> pd.Series:
-    """
-    Prob(player starts 60+). Combines:
-      - FPL chance_of_playing_next_round (0..100)
-      - 'nailedness' from team/position minutes & popularity
-      - strong GK backup penalty
-      - manual overrides (e.g., Arrizabalaga -> backup)
-    """
     df = players.copy()
-
-    # Base probability from FPL
     base = pd.to_numeric(df.get("chance_of_playing_next_round", 100), errors="coerce").fillna(100.0) / 100.0
 
-    # Popularity & minutes as nailedness
     sel = pd.to_numeric(df.get("selected_by_percent", 0.0), errors="coerce").fillna(0.0)
     sel_norm = (sel - sel.min()) / ((sel.max() - sel.min()) or 1.0)
 
@@ -94,30 +84,22 @@ def _starter_probability(players: pd.DataFrame) -> pd.Series:
     nailed = (0.6 * z["min_rank"] + 0.4 * sel_norm)
     nailed = (NAILEDNESS_SCALE * nailed).clip(0.0, 1.5)
 
-    # GK first-choice boost / backup penalty
-    first_gk = _first_choice_gk_flags(df)  # 1 for #1 GK
-    # start with no boost
+    first_gk = _first_choice_gk_flags(df)
     gk_adj = pd.Series(0.0, index=df.index)
-    # backups get hammered
     is_gk = (df["position"] == "GK").astype(float)
     gk_adj += -0.60 * is_gk * (1 - first_gk.reindex(df["player_id"]).fillna(0.0))
-    # #1 GK gets a small positive
     gk_adj += +0.10 * is_gk * first_gk.reindex(df["player_id"]).fillna(0.0)
 
-    # Manual overrides
     names = df["web_name"].astype(str)
     manual = names.map(lambda n: MANUAL_ROLE_OVERRIDES.get(n, MANUAL_ROLE_OVERRIDES.get(n.strip(), None)))
     is_manual_backup = (manual == "backup").astype(float)
     is_manual_starter = (manual == "starter").astype(float)
 
-    # Status clamp (injured/out/suspended)
     status = df.get("status", "a").astype(str)
     bad_status = status.isin(["i", "o", "n", "s"]).astype(float)
-    clamp = 1.0 - 0.85 * bad_status  # drop to ~0.15 if bad
+    clamp = 1.0 - 0.85 * bad_status
 
-    # Combine
     prob = (0.55 * base + 0.35 * nailed + gk_adj).clip(0.0, 1.0)
-    # manual backup forces low prob; manual starter nudges up
     prob = np.where(is_manual_backup > 0, np.minimum(prob, 0.10), prob)
     prob = np.where(is_manual_starter > 0, np.maximum(prob, 0.80), prob)
     prob = (prob * clamp).clip(0.0, 1.0)
@@ -130,29 +112,24 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     fx_tbl = make_fixture_table(players, teams, fixtures)
 
     df = players[[
-        "player_id","web_name","position","cost","team_id",
-        "ict_index","selected_by_percent","status","news",
-        "chance_of_playing_next_round","minutes"
+        "player_id","web_name","position","cost","team_id","minutes",
+        "ict_index","selected_by_percent","status","news","chance_of_playing_next_round"
     ]].copy()
     df = df.merge(team_strength, on="team_id", how="left")
     df = df.merge(fx_tbl, on="team_id", how="left")
 
-    # Opp strength joins
     opp_strength = team_strength.add_suffix("_opp").rename(columns={"team_id_opp": "opp_id"})
     df = df.merge(opp_strength, on="opp_id", how="left")
 
-    # Starter probability (60+ mins)
+    # starter prob (as minutes factor)
     starter_prob = _starter_probability(df)
     minutes_factor = starter_prob
 
-    # Role weighting
     role_w = df["position"].map(ROLE_W).fillna(0.9)
 
-    # ICT scaled
     ict = pd.to_numeric(df["ict_index"], errors="coerce").fillna(0.0)
     ict_z = (ict - ict.mean()) / (ict.std(ddof=0) or 1.0)
 
-    # Fixture & CS proxies
     home = df["was_home"].fillna(0)
     att = df[["strength_attack_home", "strength_attack_away"]].mean(axis=1)
     opp_def = df[["strength_defence_home_opp", "strength_defence_away_opp"]].mean(axis=1)
@@ -172,16 +149,31 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     out = df[["player_id","web_name","position","team_id","cost","status"]].copy()
     out["starter_prob"] = starter_prob.clip(0.0, 1.0)
 
-    # Harsh demotion for backups (esp GK)
+    # demote backups
     is_gk = out["position"].eq("GK")
     gk_backup_mask = is_gk & (out["starter_prob"] < 0.5)
     of_backup_mask = ~is_gk & (out["starter_prob"] < 0.35)
     xpts = np.where(gk_backup_mask, xpts * GK_BACKUP_MULT, xpts)
     xpts = np.where(of_backup_mask, xpts * BACKUP_MULT, xpts)
-
     out["xPts"] = np.maximum(xpts, 0.0)
 
-    # manual flag to surface in UI
+    # manual role string for UI
     out["manual_role"] = out["web_name"].map(lambda n: MANUAL_ROLE_OVERRIDES.get(str(n), ""))
+
+    # attach team_name for display
+    if "team_name" in teams.columns:
+        out = out.merge(teams[["team_id","team_name"]], on="team_id", how="left")
+
+    # integrate news buzz if available
+    try:
+        from . import news_state
+        buzz_map = getattr(news_state, "BUZZ", {})
+    except Exception:
+        buzz_map = {}
+    if buzz_map:
+        out["buzz"] = out["web_name"].map(lambda n: buzz_map.get(str(n), 0.0))
+        out["xPts"] = (out["xPts"] + NEWS_BUZZ_WEIGHT * out["buzz"]).clip(lower=0.0)
+    else:
+        out["buzz"] = 0.0
 
     return out
