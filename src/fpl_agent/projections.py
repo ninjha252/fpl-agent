@@ -53,44 +53,67 @@ def normalize_team_strength(teams: pd.DataFrame) -> pd.DataFrame:
     return st
 
 def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: int) -> pd.DataFrame:
-    """Compute rolling form: goals for/against, points per game, clean-sheet rate."""
-    # Only finished fixtures
+    """
+    Compute simple team form over last `lookback` finished league matches:
+      - points per game (form_ppg)
+      - goals for per game (form_gf)
+      - goals against per game (form_ga)
+      - clean sheet rate (form_cs)
+    Safe against missing columns and seasons with few finished matches.
+    """
+    # Defensive defaults if fixtures don't have the columns yet
+    req = {"team_h", "team_a", "team_h_score", "team_a_score"}
+    if not req.issubset(set(fixtures.columns)):
+        return pd.DataFrame({
+            "team_id": teams["team_id"],
+            "form_ppg": 0.0, "form_gf": 0.0, "form_ga": 0.0, "form_cs": 0.0
+        })
+
     fx = fixtures.copy()
     if "finished" in fx.columns:
         fx = fx[fx["finished"] == True]
-    cols = ["team_h","team_a","team_h_score","team_a_score","event"]
-    for c in cols:
-        if c not in fx.columns:  # old-season safety
-            return pd.DataFrame({"team_id": teams["team_id"], "form_ppg":0.0,"form_gf":0.0,"form_ga":0.0,"form_cs":0.0})
+
+    # If nothing finished yet, return zeros
+    if fx.empty:
+        return pd.DataFrame({
+            "team_id": teams["team_id"],
+            "form_ppg": 0.0, "form_gf": 0.0, "form_ga": 0.0, "form_cs": 0.0
+        })
 
     rows = []
     for _, m in fx.iterrows():
         h = int(m["team_h"]); a = int(m["team_a"])
-        hs = int(m.get("team_h_score",0) or 0); as_ = int(m.get("team_a_score",0) or 0)
-        # points
-        if hs > as_: h_pts, a_pts = 3, 0
-        elif hs < as_: h_pts, a_pts = 0, 3
-        else: h_pts, a_pts = 1, 1
-        rows.append({"team_id":h, "gf":hs, "ga":as_, "pts":h_pts, "cs":1 if as_==0 else 0})
-        rows.append({"team_id":a, "gf":as_, "ga":hs, "pts":a_pts, "cs":1 if hs==0 else 0})
+        hs = int(m.get("team_h_score", 0) or 0)
+        as_ = int(m.get("team_a_score", 0) or 0)
+
+        # match points
+        if hs > as_:
+            h_pts, a_pts = 3, 0
+        elif hs < as_:
+            h_pts, a_pts = 0, 3
+        else:
+            h_pts, a_pts = 1, 1
+
+        rows.append({"team_id": h, "gf": hs, "ga": as_, "pts": h_pts, "cs": 1 if as_ == 0 else 0})
+        rows.append({"team_id": a, "gf": as_, "ga": hs, "pts": a_pts, "cs": 1 if hs == 0 else 0})
 
     df = pd.DataFrame(rows)
-    df["n"] = 1
-    df = df.groupby("team_id", as_index=False).rolling(lookback, min_periods=1, on=None).sum()
-    # the above rolling on grouped is messy; simpler:
-    grp = pd.DataFrame(rows).groupby("team_id")
+
+    # Per-team: take last N matches and compute per-game rates
     feats = []
-    for tid, g in grp:
+    for tid, g in df.groupby("team_id", sort=False):
         g = g.tail(lookback)
-        n = max(len(g),1)
+        n = max(len(g), 1)
         feats.append({
             "team_id": tid,
-            "form_ppg": g["pts"].sum()/n,
-            "form_gf": g["gf"].sum()/n,
-            "form_ga": g["ga"].sum()/n,
-            "form_cs": g["cs"].sum()/n,
+            "form_ppg": g["pts"].sum() / n,
+            "form_gf":  g["gf"].sum()  / n,
+            "form_ga":  g["ga"].sum()  / n,
+            "form_cs":  g["cs"].sum()  / n,
         })
+
     return pd.DataFrame(feats)
+
 
 # ---------- starter logic ----------
 def _first_choice_gk_flags(players: pd.DataFrame) -> pd.Series:
