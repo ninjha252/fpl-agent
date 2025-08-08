@@ -62,32 +62,98 @@ def _greedy_repair_squad(pool: pd.DataFrame, want: Dict[str, int], budget: float
         raise ValueError("Could not build a legal 15-man squad under constraints.")
     return chosen[:15]
 
-def _repair_xi_to_formation(xi: List[int], all_ids: List[int], pos_map: Dict[int,str], xpts: Dict[int,float]) -> List[int]:
-    """Ensure 1 GK, ≥3 DEF, ≥3 MID, ≥1 FWD by swapping in best candidates."""
-    counts = {"GK":0,"DEF":0,"MID":0,"FWD":0}
-    for i in xi:
-        counts[pos_map[i]] = counts.get(pos_map[i],0)+1
+def _repair_xi_to_formation(xi: List[int], all_ids: List[int],
+                            pos_map: Dict[int, str], xpts: Dict[int, float]) -> List[int]:
+    """
+    Ensure XI is legal:
+      - exactly 1 GK
+      - DEF >= 3, MID >= 3, FWD >= 1
+      - total = 11
+    Never shrink below 11; only swap when a replacement exists.
+    """
+    xi = list(dict.fromkeys(xi))  # dedupe
+    # If somehow <11, pad with best remaining
+    if len(xi) < 11:
+        for i in sorted(all_ids, key=lambda j: xpts[j], reverse=True):
+            if i not in xi:
+                xi.append(i)
+                if len(xi) == 11:
+                    break
 
+    def recount():
+        return {
+            "GK": sum(pos_map[i] == "GK" for i in xi),
+            "DEF": sum(pos_map[i] == "DEF" for i in xi),
+            "MID": sum(pos_map[i] == "MID" for i in xi),
+            "FWD": sum(pos_map[i] == "FWD" for i in xi),
+        }
+
+    counts = recount()
     sorted_ids = sorted(all_ids, key=lambda i: xpts[i], reverse=True)
 
-    def swap_in(role: str, k: int):
+    # --- enforce exactly 1 GK ---
+    while counts["GK"] > 1:
+        # candidate non-GK replacement available?
+        repl = next((i for i in sorted_ids if pos_map[i] != "GK" and i not in xi), None)
+        if repl is None:
+            break  # can't fix without shrinking XI; abort
+        # remove worst GK
+        gks = [j for j in xi if pos_map[j] == "GK"]
+        worst_gk = min(gks, key=lambda j: xpts[j])
+        xi.remove(worst_gk); xi.append(repl)
+        counts = recount()
+
+    while counts["GK"] < 1:
+        # need one GK: find best GK not in XI AND a non-GK we can drop
+        add_gk = next((i for i in sorted_ids if pos_map[i] == "GK" and i not in xi), None)
+        drop = min([j for j in xi if pos_map[j] != "GK"], key=lambda j: xpts[j], default=None)
+        if add_gk is None or drop is None:
+            break
+        xi.remove(drop); xi.append(add_gk)
+        counts = recount()
+
+    # --- helper to raise a role to minimum by swapping the worst over-represented role ---
+    def raise_min(role: str, k: int):
         nonlocal xi, counts
-        while counts.get(role,0) < k:
-            # pick best candidate for the needed role not already in XI
-            cand = next((i for i in sorted_ids if pos_map[i]==role and i not in xi), None)
-            if cand is None: break
-            # remove worst from an over-represented role
-            over_roles = []
-            if role != "DEF": over_roles += ["DEF"]  # DEF min is 3
-            if role != "MID": over_roles += ["MID"]  # MID min is 3
-            if role != "FWD": over_roles += ["FWD"]  # FWD min is 1
-            victims = [j for j in xi if pos_map[j] in over_roles and not (pos_map[j]=="FWD" and counts["FWD"]<=1)
-                       and not (pos_map[j]=="DEF" and counts["DEF"]<=3)
-                       and not (pos_map[j]=="MID" and counts["MID"]<=3)]
-            if not victims: break
+        tries = 0
+        while counts.get(role, 0) < k and tries < 20:
+            tries += 1
+            cand = next((i for i in sorted_ids if pos_map[i] == role and i not in xi), None)
+            if cand is None:
+                break
+            # pick cheapest (lowest xPts) victim from roles that are above their mins
+            victims = []
+            for r, rmin in (("DEF", 3), ("MID", 3), ("FWD", 1)):
+                if r != role and counts.get(r, 0) > rmin:
+                    victims += [j for j in xi if pos_map[j] == r]
+            if not victims:
+                break
             worst = min(victims, key=lambda j: xpts[j])
             xi.remove(worst); xi.append(cand)
-            counts[pos_map[worst]] -= 1; counts[role] = counts.get(role,0)+1
+            counts = recount()
+
+    # enforce mins
+    raise_min("DEF", 3)
+    raise_min("MID", 3)
+    raise_min("FWD", 1)
+
+    # If length drifted (shouldn’t), pad back to 11 with best remaining that doesn’t break GK=1
+    while len(xi) < 11:
+        add = next((i for i in sorted_ids if i not in xi and not (pos_map[i] == "GK" and counts["GK"] >= 1)), None)
+        if add is None:
+            break
+        xi.append(add)
+        counts = recount()
+
+    # If >11 somehow (shouldn’t), drop the lowest xPts non-essential role
+    while len(xi) > 11:
+        victims = [j for j in xi if not (pos_map[j] == "GK" and counts["GK"] == 1)]
+        worst = min(victims, key=lambda j: xpts[j])
+        xi.remove(worst)
+        counts = recount()
+
+    return xi
+
 
     # enforce formation
     # exactly 1 GK:
