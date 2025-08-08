@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # --- Path fix so imports work on Streamlit Cloud ---
-import os, sys, time
+import os, sys
 ROOT = os.path.dirname(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -18,7 +18,7 @@ from src.fpl_agent.utils import SquadRules
 from src.fpl_agent import projections as proj_mod
 from src.fpl_agent import news_state
 from src.fpl_agent.news_signals import build_buzz_map
-# Free odds adapter (no API keys)
+# Optional FREE odds (best-effort; can be toggled off)
 from src.fpl_agent.odds_adapter_free import fetch_match_odds as fetch_odds_free
 
 # ---------------- UI CONFIG ----------------
@@ -37,7 +37,7 @@ with st.sidebar:
 
     st.markdown("### Form & Odds")
     form_n = st.slider("Form lookback (games)", 3, 10, 6, 1)
-    odds_on = st.checkbox("Use FREE bookmaker odds (experimental)", value=True)
+    odds_on = st.checkbox("Use FREE bookmaker odds (experimental)", value=False)  # optional now
     odds_w = st.slider("Odds weight", 0.0, 1.5, 0.6, 0.05)
 
     st.markdown("### News & Buzz")
@@ -66,19 +66,18 @@ proj_mod.set_form_lookback(form_n)
 proj_mod.set_odds_weight(odds_w)
 proj_mod.NEWS_BUZZ_WEIGHT = buzz_weight
 
-# Manual backups injection (quick override)
+# Manual backups injection
 for name in [n.strip() for n in manual_backups.split(",") if n.strip()]:
     proj_mod.set_manual_role_override(name, "backup")
 
-# Build news buzz map (optional)
+# Buzz (optional)
 news_state.BUZZ = {}
 if use_buzz:
     st.toast("Fetching buzz…", icon="📰")
     names = players["web_name"].astype(str).tolist()
     news_state.BUZZ = build_buzz_map(st.secrets, names, reddit_subs=subs)
 
-# ---------------- OPTIONAL: FREE ODDS (pre-fetch for projections) ----------------
-# If odds_on, we preload team-level win probs and stash in session for projections to read via merge.
+# FREE odds prefetch (optional)
 if odds_on:
     with st.spinner("Fetching free odds (best-effort)…"):
         try:
@@ -90,7 +89,7 @@ else:
 
 # ---------------- PROJECTIONS ----------------
 proj = expected_points_next_gw(players, teams, fixtures)
-# Merge free odds if available (so they show up in the table even if projections already used them)
+# Merge free odds just to display (projections may already have used some odds internally)
 if isinstance(st.session_state.get("_free_odds_df"), pd.DataFrame) and not st.session_state["_free_odds_df"].empty:
     proj = proj.merge(st.session_state["_free_odds_df"], on="team_name", how="left")
 
@@ -98,11 +97,10 @@ if hide_thresh > 0:
     sp = proj.get("starter_prob", 1.0)
     proj = proj[sp >= hide_thresh].copy()
 
-# ---- Safe column selection helper ----
 def safe_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
     return [c for c in cols if c in df.columns]
 
-# ---------------- PLAYER SEARCH (with free-odds lookup) ----------------
+# ---------------- SEARCH ----------------
 with st.expander("🔎 Search players / teams"):
     q = st.text_input("Type a player or team name")
     if q.strip():
@@ -117,33 +115,18 @@ with st.expander("🔎 Search players / teams"):
             use_container_width=True
         )
 
-        # Free odds for that player's team (best-effort scrape)
-        if st.button("Fetch free odds for this search"):
-            with st.spinner("Searching free odds…"):
-                try:
-                    # use first matching team name
-                    team = res["team_name"].dropna().astype(str).iloc[0]
-                    odd_df = fetch_odds_free(pd.DataFrame({"team_name":[team]}))
-                    if odd_df is not None and not odd_df.empty:
-                        st.success("Found odds (implied probabilities):")
-                        st.table(odd_df)
-                    else:
-                        st.info("No odds found from free sources right now.")
-                except Exception as e:
-                    st.info("No odds found from free sources right now.")
-
 # ---------------- MAIN TABLE ----------------
+st.subheader("Projected points (next GW)")
 display_cols = safe_cols(
     proj,
     ["player_id", "web_name", "position", "team_name", "cost", "starter_prob", "win_prob", "buzz", "xPts"]
 )
-st.subheader("Projected points (next GW)")
 st.dataframe(
     proj.sort_values("xPts", ascending=False)[display_cols].head(50),
     use_container_width=True
 )
 
-# ---------------- SQUAD BUILDER / XI OPT ----------------
+# ---------------- SQUAD BUILDER / OPTIMIZER ----------------
 rules = SquadRules(budget=budget)
 opt = SquadOptimizer(rules)
 
@@ -170,46 +153,4 @@ if build_mode == "Build initial 15":
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("### Starting XI + C/VC")
-            st.dataframe(xi[xi_cols], use_container_width=True)
-            st.success(f"Captain: {cap.web_name} | Vice: {vice.web_name}")
-        with col2:
-            st.markdown("### Bench")
-            st.dataframe(bench[bench_cols], use_container_width=True)
-
-else:
-    st.subheader("Optimize my 15 (paste current squad)")
-    st.caption("Paste your 15 player IDs (comma-separated). Find IDs in the table above (column: player_id).")
-    ids_text = st.text_area("Your 15 player IDs", "")
-
-    if st.button("Optimize XI + C/VC"):
-        try:
-            ids = [int(x.strip()) for x in ids_text.split(",") if x.strip()]
-            assert len(ids) == 15, "You must provide exactly 15 player IDs."
-            chosen = proj[proj.player_id.isin(ids)].copy()
-            xi, bench, captain, vice = opt._pick_xi_captain(chosen)
-
-            xi_df = chosen[chosen.player_id.isin(xi)].sort_values(["team_name", "xPts"], ascending=[True, False])
-            bench_df = chosen[chosen.player_id.isin(bench)].sort_values(["team_name", "xPts"], ascending=[True, False])
-
-            xi_cols = safe_cols(xi_df, ["web_name", "position", "team_name", "cost", "xPts"])
-            bench_cols = safe_cols(bench_df, ["web_name", "position", "team_name", "cost", "xPts"])
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("### Starting XI + C/VC")
-                st.dataframe(xi_df[xi_cols], use_container_width=True)
-                cap = chosen[chosen.player_id == captain].iloc[0]
-                v = chosen[chosen.player_id == vice].iloc[0]
-                st.success(f"Captain: {cap.web_name} | Vice: {v.web_name}")
-            with col2:
-                st.markdown("### Bench")
-                st.dataframe(bench_df[bench_cols], use_container_width=True)
-        except Exception as e:
-            st.error(str(e))
-
-st.divider()
-st.markdown(
-    "#### Notes\n"
-    "- Free odds scrapes can fail near kickoff; the app just falls back gracefully.\n"
-    "- Use the search box to filter players and quickly fetch free odds for their team.\n"
-)
+            st.dataframe(xi[xi_cols], use_contai]()
