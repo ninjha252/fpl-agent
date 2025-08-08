@@ -16,4 +16,3 @@ class FPL:
         r = requests.get(f"{BASE}/fixtures/")
         r.raise_for_status()
         return r.json()
-# fpl_api.py placeholder
