@@ -21,7 +21,7 @@ TEAM_KEYS = [
     "strength_defence_home", "strength_defence_away",
 ]
 
-def set_nailedness_scale(v: float):    # UI accessors
+def set_nailedness_scale(v: float):
     global NAILEDNESS_SCALE; NAILEDNESS_SCALE = float(v)
 def set_starter_hide_threshold(v: float):
     global STARTER_HIDE_THRESHOLD; STARTER_HIDE_THRESHOLD = float(v)
@@ -59,9 +59,7 @@ def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: in
       - goals for per game (form_gf)
       - goals against per game (form_ga)
       - clean sheet rate (form_cs)
-    Safe against missing columns and seasons with few finished matches.
     """
-    # Defensive defaults if fixtures don't have the columns yet
     req = {"team_h", "team_a", "team_h_score", "team_a_score"}
     if not req.issubset(set(fixtures.columns)):
         return pd.DataFrame({
@@ -73,7 +71,6 @@ def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: in
     if "finished" in fx.columns:
         fx = fx[fx["finished"] == True]
 
-    # If nothing finished yet, return zeros
     if fx.empty:
         return pd.DataFrame({
             "team_id": teams["team_id"],
@@ -86,20 +83,15 @@ def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: in
         hs = int(m.get("team_h_score", 0) or 0)
         as_ = int(m.get("team_a_score", 0) or 0)
 
-        # match points
-        if hs > as_:
-            h_pts, a_pts = 3, 0
-        elif hs < as_:
-            h_pts, a_pts = 0, 3
-        else:
-            h_pts, a_pts = 1, 1
+        if hs > as_: h_pts, a_pts = 3, 0
+        elif hs < as_: h_pts, a_pts = 0, 3
+        else: h_pts, a_pts = 1, 1
 
         rows.append({"team_id": h, "gf": hs, "ga": as_, "pts": h_pts, "cs": 1 if as_ == 0 else 0})
         rows.append({"team_id": a, "gf": as_, "ga": hs, "pts": a_pts, "cs": 1 if hs == 0 else 0})
 
     df = pd.DataFrame(rows)
 
-    # Per-team: take last N matches and compute per-game rates
     feats = []
     for tid, g in df.groupby("team_id", sort=False):
         g = g.tail(lookback)
@@ -113,7 +105,6 @@ def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: in
         })
 
     return pd.DataFrame(feats)
-
 
 # ---------- starter logic ----------
 def _first_choice_gk_flags(players: pd.DataFrame) -> pd.Series:
@@ -162,13 +153,6 @@ def _starter_probability(players: pd.DataFrame) -> pd.Series:
     prob = (prob * clamp).clip(0.0, 1.0)
     return pd.Series(prob, index=df.index)
 
-# inside projections.py, near the top of expected_points_next_gw
-try:
-    from .odds_adapter_free import fetch_match_odds
-    odds = fetch_match_odds(teams[["team_id","team_name"]])
-except Exception:
-    odds = pd.DataFrame()
-
 # ---------- main ----------
 def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame) -> pd.DataFrame:
     team_strength = normalize_team_strength(teams)
@@ -186,9 +170,9 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     opp_strength = team_strength.add_suffix("_opp").rename(columns={"team_id_opp": "opp_id"})
     df = df.merge(opp_strength, on="opp_id", how="left")
 
-    # Optional bookmaker odds
+    # Optional bookmaker odds (FREE adapter, best-effort)
     try:
-        from .odds_adapter import fetch_match_odds
+        from .odds_adapter_free import fetch_match_odds
         odds = fetch_match_odds(teams[["team_id","team_name"]])
     except Exception:
         odds = pd.DataFrame()
@@ -214,15 +198,15 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     cs_proxy = (team_def - opp_att).clip(-2, 2) * df["position"].isin(["GK","DEF"]).astype(float)
 
     # form features (scaled)
-    form_ppg = df["form_ppg"].fillna(df["form_ppg"].mean() if "form_ppg" in df else 0.0)
-    form_gf  = df.get("form_gf", pd.Series(0, index=df.index)).fillna(0.0)
-    form_ga  = df.get("form_ga", pd.Series(0, index=df.index)).fillna(0.0)
-    form_cs  = df.get("form_cs", pd.Series(0, index=df.index)).fillna(0.0)
+    form_ppg = df.get("form_ppg", pd.Series(0, index=df.index)).fillna(0.0)
+    form_gf  = df.get("form_gf",  pd.Series(0, index=df.index)).fillna(0.0)
+    form_ga  = df.get("form_ga",  pd.Series(0, index=df.index)).fillna(0.0)
+    form_cs  = df.get("form_cs",  pd.Series(0, index=df.index)).fillna(0.0)
     form_adj = 0.4*form_ppg + 0.3*(form_gf - form_ga) + 0.3*form_cs
 
     # odds features (if present)
-    win_prob   = df.get("win_prob", pd.Series(0, index=df.index)).fillna(0.0)
-    over25_prob= df.get("over25_prob", pd.Series(0, index=df.index)).fillna(0.0)
+    win_prob    = df.get("win_prob", pd.Series(0, index=df.index)).fillna(0.0)
+    over25_prob = df.get("over25_prob", pd.Series(0, index=df.index)).fillna(0.0)
     odds_adj = ODDS_WEIGHT * (0.7*win_prob + 0.3*over25_prob)
 
     sel = pd.to_numeric(df["selected_by_percent"], errors="coerce").fillna(0.0)
