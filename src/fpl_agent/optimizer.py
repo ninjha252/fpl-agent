@@ -24,7 +24,7 @@ def _coerce_pool(df: pd.DataFrame) -> pd.DataFrame:
     out["team_id"]   = pd.to_numeric(out["team_id"],   errors="coerce").astype("Int64")
     out["cost"]      = pd.to_numeric(out["cost"],      errors="coerce").astype(float)
     out["xPts"]      = pd.to_numeric(out["xPts"],      errors="coerce").astype(float)
-    out["position"]  = out["position"].astype(str).str.upper().str.strip()
+    out["position"]  = out["position"].astype(str).upper().str.strip()
     out = out.dropna(subset=["player_id", "team_id", "cost", "xPts"]).copy()
     out["player_id"] = out["player_id"].astype(int)
     out["team_id"]   = out["team_id"].astype(int)
@@ -218,7 +218,6 @@ class SquadOptimizer:
 
     # ---------- transfer suggester ----------
     def _xi_points(self, squad_df: pd.DataFrame) -> float:
-        """Approx XI expectation: sum(xPts XI) + extra xPts for captain."""
         xi, _, cap, _ = self._pick_xi_captain(squad_df)
         x = squad_df[squad_df.player_id.isin(xi)]["xPts"].sum()
         xc = float(squad_df.loc[squad_df.player_id == cap, "xPts"].iloc[0])
@@ -234,14 +233,8 @@ class SquadOptimizer:
         hit_cost: int = 4,
         team_cap: int = 3,
     ) -> Dict[str, object]:
-        """
-        Greedy, formation-aware transfer suggestions.
-        Returns dict with 'suggestions' list and 'final_points'.
-        Each suggestion: {out_id,in_id,out_name,in_name,delta_pts,cost_diff,net_gain}
-        """
         squad = _coerce_pool(current15)
         pool  = _coerce_pool(pool)
-
         if len(squad) != 15:
             raise ValueError("Provide exactly 15 players from your current squad.")
 
