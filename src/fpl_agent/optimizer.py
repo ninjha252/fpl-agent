@@ -12,22 +12,53 @@ def _status_ok(prob: pl.LpProblem) -> bool:
     except Exception:
         return False
 
+def _normalize_position_series(s: pd.Series) -> pd.Series:
+    """Normalize position labels to GK/DEF/MID/FWD."""
+    ss = s.astype(str).str.upper().str.strip()
+    # common variants
+    ss = ss.replace(
+        {
+            "GKP": "GK",
+            "GOALKEEPER": "GK",
+            "GOALIE": "GK",
+            "DEFENDER": "DEF",
+            "MIDFIELDER": "MID",
+            "FORWARD": "FWD",
+            "STRIKER": "FWD",
+            "ATTACKER": "FWD",
+        }
+    )
+    # If someone passes numeric codes (1..4), map them
+    ss = ss.replace({"1": "GK", "2": "DEF", "3": "MID", "4": "FWD"})
+    return ss
+
 def _coerce_pool(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure required columns/dtypes and normalize positions."""
     need = {"player_id", "position", "team_id", "cost", "xPts"}
     missing = need - set(df.columns)
     if missing:
-        raise ValueError(f"Optimizer pool missing columns: {sorted(missing)}")
+        raise ValueError(
+            f"Optimizer pool missing columns: {sorted(missing)}. "
+            "Make sure you pass the projections DataFrame (it has xPts)."
+        )
 
     out = df.copy()
+    # basic types
     out["player_id"] = pd.to_numeric(out["player_id"], errors="coerce").astype("Int64")
     out["team_id"]   = pd.to_numeric(out["team_id"],   errors="coerce").astype("Int64")
     out["cost"]      = pd.to_numeric(out["cost"],      errors="coerce").astype(float)
     out["xPts"]      = pd.to_numeric(out["xPts"],      errors="coerce").astype(float)
-    out["position"]  = out["position"].astype(str).upper().str.strip()
+    # ✅ fix: use .str.* for string ops
+    out["position"]  = _normalize_position_series(out["position"])
+
     out = out.dropna(subset=["player_id", "team_id", "cost", "xPts"]).copy()
     out["player_id"] = out["player_id"].astype(int)
     out["team_id"]   = out["team_id"].astype(int)
+
+    # keep only known positions
+    out = out[out["position"].isin(["GK", "DEF", "MID", "FWD"])].copy()
+    if out.empty:
+        raise ValueError("No valid players after position normalization.")
     return out
 
 def _pos_ids(df: pd.DataFrame, pos: str) -> List[int]:
@@ -144,6 +175,14 @@ class SquadOptimizer:
     # ---------- building 15 ----------
     def pick_initial_squad(self, pool: pd.DataFrame) -> Dict[str, List[int]]:
         pool = _coerce_pool(pool)
+
+        # Cap candidates per position for speed on small CPUs
+        caps = {"GK": 20, "DEF": 80, "MID": 100, "FWD": 60}
+        sub = []
+        for pos, cap in caps.items():
+            sub.append(pool[pool.position == pos].nlargest(cap, "xPts"))
+        pool = pd.concat(sub, ignore_index=True)
+
         ids = pool.player_id.tolist()
         cost_map = dict(zip(pool.player_id, pool.cost))
         xpts_map = dict(zip(pool.player_id, pool.xPts))
@@ -238,6 +277,13 @@ class SquadOptimizer:
         if len(squad) != 15:
             raise ValueError("Provide exactly 15 players from your current squad.")
 
+        # limit candidate pool per position for speed
+        caps = {"GK": 30, "DEF": 80, "MID": 100, "FWD": 70}
+        pool_limited = []
+        for pos, cap in caps.items():
+            pool_limited.append(pool[pool.position == pos].nlargest(cap, "xPts"))
+        pool = pd.concat(pool_limited, ignore_index=True)
+
         team_counts = squad["team_id"].value_counts().to_dict()
         have_ids = set(squad["player_id"].tolist())
         base_pts = self._xi_points(squad)
@@ -250,14 +296,15 @@ class SquadOptimizer:
             best = None
             best_gain = 0.0
 
-            for _, row_out in squad.iterrows():
+            # Try replacing weakest players first to prune search
+            for _, row_out in squad.sort_values("xPts").iterrows():
                 pos = row_out["position"]
                 out_id = int(row_out["player_id"])
                 out_team = int(row_out["team_id"])
                 out_cost = float(row_out["cost"])
 
                 candidates = pool[(pool["position"] == pos) & (~pool["player_id"].isin(have_ids))] \
-                                .sort_values("xPts", ascending=False).head(80)
+                                .nlargest(60, "xPts")
 
                 for _, row_in in candidates.iterrows():
                     in_id = int(row_in["player_id"])
@@ -272,6 +319,7 @@ class SquadOptimizer:
                         continue
 
                     tmp = squad.copy()
+                    # copy common metadata if present
                     tmp.loc[tmp.player_id == out_id, ["player_id","team_id","cost","xPts","position","web_name","team_name"]] = [
                         in_id, in_team, in_cost, float(row_in["xPts"]), pos,
                         str(row_in.get("web_name", in_id)),
