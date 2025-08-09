@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from typing import Dict
+from typing import Dict, Optional
 
 # ==== knobs (set from Streamlit) ====
 NAILEDNESS_SCALE: float = 1.0
@@ -9,8 +9,8 @@ STARTER_HIDE_THRESHOLD: float = 0.35
 GK_BACKUP_MULT: float = 0.10
 BACKUP_MULT: float = 0.25
 NEWS_BUZZ_WEIGHT: float = 0.5
-FORM_LOOKBACK: int = 6         # last N fixtures
-ODDS_WEIGHT: float = 0.6       # weight on odds signals
+FORM_LOOKBACK: int = 6
+ODDS_WEIGHT: float = 0.6
 
 MANUAL_ROLE_OVERRIDES: Dict[str, str] = {"Arrizabalaga":"backup","Kepa":"backup"}
 
@@ -21,16 +21,12 @@ TEAM_KEYS = [
     "strength_defence_home", "strength_defence_away",
 ]
 
-def set_nailedness_scale(v: float):
-    global NAILEDNESS_SCALE; NAILEDNESS_SCALE = float(v)
-def set_starter_hide_threshold(v: float):
-    global STARTER_HIDE_THRESHOLD; STARTER_HIDE_THRESHOLD = float(v)
+def set_nailedness_scale(v: float):    global NAILEDNESS_SCALE; NAILEDNESS_SCALE = float(v)
+def set_starter_hide_threshold(v: float): global STARTER_HIDE_THRESHOLD; STARTER_HIDE_THRESHOLD = float(v)
 def set_manual_role_override(name: str, role: str):
     if name: MANUAL_ROLE_OVERRIDES[str(name).strip()] = role.lower().strip()
-def set_form_lookback(n: int):
-    global FORM_LOOKBACK; FORM_LOOKBACK = int(n)
-def set_odds_weight(w: float):
-    global ODDS_WEIGHT; ODDS_WEIGHT = float(w)
+def set_form_lookback(n: int):         global FORM_LOOKBACK; FORM_LOOKBACK = int(n)
+def set_odds_weight(w: float):         global ODDS_WEIGHT; ODDS_WEIGHT = float(w)
 
 # ---------- helpers ----------
 def make_fixture_table(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame) -> pd.DataFrame:
@@ -53,13 +49,6 @@ def normalize_team_strength(teams: pd.DataFrame) -> pd.DataFrame:
     return st
 
 def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: int) -> pd.DataFrame:
-    """
-    Compute simple team form over last `lookback` finished league matches:
-      - points per game (form_ppg)
-      - goals for per game (form_gf)
-      - goals against per game (form_ga)
-      - clean sheet rate (form_cs)
-    """
     req = {"team_h", "team_a", "team_h_score", "team_a_score"}
     if not req.issubset(set(fixtures.columns)):
         return pd.DataFrame({
@@ -70,7 +59,6 @@ def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: in
     fx = fixtures.copy()
     if "finished" in fx.columns:
         fx = fx[fx["finished"] == True]
-
     if fx.empty:
         return pd.DataFrame({
             "team_id": teams["team_id"],
@@ -82,11 +70,9 @@ def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: in
         h = int(m["team_h"]); a = int(m["team_a"])
         hs = int(m.get("team_h_score", 0) or 0)
         as_ = int(m.get("team_a_score", 0) or 0)
-
         if hs > as_: h_pts, a_pts = 3, 0
         elif hs < as_: h_pts, a_pts = 0, 3
         else: h_pts, a_pts = 1, 1
-
         rows.append({"team_id": h, "gf": hs, "ga": as_, "pts": h_pts, "cs": 1 if as_ == 0 else 0})
         rows.append({"team_id": a, "gf": as_, "ga": hs, "pts": a_pts, "cs": 1 if hs == 0 else 0})
 
@@ -98,18 +84,15 @@ def team_form_features(fixtures: pd.DataFrame, teams: pd.DataFrame, lookback: in
         n = max(len(g), 1)
         feats.append({
             "team_id": tid,
-            "form_ppg": g["pts"].sum() / n,
-            "form_gf":  g["gf"].sum()  / n,
-            "form_ga":  g["ga"].sum()  / n,
-            "form_cs":  g["cs"].sum()  / n,
+            "form_ppg": g["pts"].sum()/n,
+            "form_gf":  g["gf"].sum()/n,
+            "form_ga":  g["ga"].sum()/n,
+            "form_cs":  g["cs"].sum()/n,
         })
-
     return pd.DataFrame(feats)
 
-# ---------- starter logic ----------
 def _first_choice_gk_flags(players: pd.DataFrame) -> pd.Series:
-    cols = ["player_id", "team_id", "cost", "minutes", "selected_by_percent"]
-    gk = players[players["position"] == "GK"][cols].copy()
+    gk = players[players["position"] == "GK"][["player_id","team_id","cost","minutes","selected_by_percent"]].copy()
     gk["minutes"] = pd.to_numeric(gk.get("minutes", 0), errors="coerce").fillna(0.0)
     gk["selected_by_percent"] = pd.to_numeric(gk.get("selected_by_percent", 0), errors="coerce").fillna(0.0)
     gk = gk.sort_values(["team_id","minutes","selected_by_percent","cost"], ascending=[True,False,False,False])
@@ -120,15 +103,12 @@ def _first_choice_gk_flags(players: pd.DataFrame) -> pd.Series:
 def _starter_probability(players: pd.DataFrame) -> pd.Series:
     df = players.copy()
     base = pd.to_numeric(df.get("chance_of_playing_next_round", 100), errors="coerce").fillna(100.0) / 100.0
-
     sel = pd.to_numeric(df.get("selected_by_percent", 0.0), errors="coerce").fillna(0.0)
     sel_norm = (sel - sel.min()) / ((sel.max() - sel.min()) or 1.0)
-
     mins = pd.to_numeric(df.get("minutes", 0.0), errors="coerce").fillna(0.0)
-    z = df[["team_id", "position"]].copy()
+    z = df[["team_id","position"]].copy()
     z["minutes"] = mins
-    z["min_rank"] = z.groupby(["team_id", "position"])["minutes"] \
-                     .transform(lambda s: (s - s.min()) / ((s.max() - s.min()) or 1.0))
+    z["min_rank"] = z.groupby(["team_id","position"])["minutes"].transform(lambda s: (s - s.min()) / ((s.max() - s.min()) or 1.0))
     nailed = (0.6 * z["min_rank"] + 0.4 * sel_norm)
     nailed = (NAILEDNESS_SCALE * nailed).clip(0.0, 1.5)
 
@@ -154,7 +134,14 @@ def _starter_probability(players: pd.DataFrame) -> pd.Series:
     return pd.Series(prob, index=df.index)
 
 # ---------- main ----------
-def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame) -> pd.DataFrame:
+def expected_points_next_gw(
+    players: pd.DataFrame,
+    teams: pd.DataFrame,
+    fixtures: pd.DataFrame,
+    odds_df: Optional[pd.DataFrame] = None,
+    buzz_map: Optional[Dict[str, float]] = None,
+) -> pd.DataFrame:
+
     team_strength = normalize_team_strength(teams)
     fx_tbl = make_fixture_table(players, teams, fixtures)
     form = team_form_features(fixtures, teams, FORM_LOOKBACK)
@@ -170,14 +157,15 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     opp_strength = team_strength.add_suffix("_opp").rename(columns={"team_id_opp": "opp_id"})
     df = df.merge(opp_strength, on="opp_id", how="left")
 
-    # Optional bookmaker odds (FREE adapter, best-effort)
-    try:
-        from .odds_adapter_free import fetch_match_odds
-        odds = fetch_match_odds(teams[["team_id","team_name"]])
-    except Exception:
-        odds = pd.DataFrame()
-    if isinstance(odds, pd.DataFrame) and not odds.empty:
-        df = df.merge(odds, on="team_name", how="left")
+    # Optional bookmaker odds: merge, don't fetch
+    if isinstance(odds_df, pd.DataFrame) and not odds_df.empty and "team_name" in teams.columns:
+        df = df.merge(teams[["team_id","team_name"]], on="team_id", how="left")
+        df = df.merge(odds_df, on="team_name", how="left")
+    else:
+        if "team_name" in teams.columns:
+            df = df.merge(teams[["team_id","team_name"]], on="team_id", how="left")
+        df["win_prob"] = 0.0
+        df["over25_prob"] = 0.0
 
     # starter minutes factor
     starter_prob = _starter_probability(df)
@@ -223,7 +211,7 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     )
     xpts = 4.0 + 2.0 * xpts
 
-    out = df[["player_id","web_name","position","team_id","cost","status"]].copy()
+    out = df[["player_id","web_name","position","team_id","team_name","cost","status"]].copy()
     out["starter_prob"] = starter_prob.clip(0.0, 1.0)
 
     is_gk = out["position"].eq("GK")
@@ -233,16 +221,8 @@ def expected_points_next_gw(players: pd.DataFrame, teams: pd.DataFrame, fixtures
     xpts = np.where(of_backup_mask, xpts * BACKUP_MULT, xpts)
     out["xPts"] = np.maximum(xpts, 0.0)
 
-    if "team_name" in teams.columns:
-        out = out.merge(teams[["team_id","team_name"]], on="team_id", how="left")
-
-    # integrate news buzz if available
-    try:
-        from . import news_state
-        buzz_map = getattr(news_state, "BUZZ", {})
-    except Exception:
-        buzz_map = {}
-    if buzz_map:
+    # integrate news buzz if provided
+    if isinstance(buzz_map, dict) and buzz_map:
         out["buzz"] = out["web_name"].map(lambda n: buzz_map.get(str(n), 0.0))
         out["xPts"] = (out["xPts"] + NEWS_BUZZ_WEIGHT * out["buzz"]).clip(lower=0.0)
     else:
