@@ -42,7 +42,7 @@ def _extract_first_float(text: str) -> Optional[float]:
 def _search_ddg(q: str) -> Optional[str]:
     try:
         url = f"https://duckduckgo.com/html/?q={requests.utils.quote(q)}"
-        r = requests.get(url, headers=UA, timeout=10)
+        r = requests.get(url, headers=UA, timeout=4)
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "lxml")
@@ -55,7 +55,7 @@ def _search_ddg(q: str) -> Optional[str]:
 
 def _scrape_oddsportal_match(url: str) -> Optional[Tuple[str, str, float, float, float]]:
     try:
-        r = requests.get(url, headers=UA, timeout=10)
+        r = requests.get(url, headers=UA, timeout=4)
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "lxml")
@@ -85,7 +85,7 @@ def _scrape_oddsportal_match(url: str) -> Optional[Tuple[str, str, float, float,
 
 def _scrape_bettingodds_match(url: str) -> Optional[Tuple[str, str, float, float, float]]:
     try:
-        r = requests.get(url, headers=UA, timeout=10)
+        r = requests.get(url, headers=UA, timeout=4)
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "lxml")
@@ -109,7 +109,7 @@ def _scrape_bettingodds_match(url: str) -> Optional[Tuple[str, str, float, float
     except Exception:
         return None
 
-def fetch_match_odds(teams_df: pd.DataFrame, sleep_between: float = 0.2) -> pd.DataFrame:
+def fetch_match_odds(teams_df: pd.DataFrame, sleep_between: float = 0.15) -> pd.DataFrame:
     team_names = [str(x) for x in teams_df.get("team_name", []) if pd.notna(x)]
     out_rows: List[Dict] = []
 
