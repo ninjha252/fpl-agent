@@ -209,7 +209,7 @@ def expected_points_next_gw(
         odds_adj +
         bonus_proxy
     )
-    xpts = 4.0 + 2.0 * xpts
+    xpts = 2.0 + 1.0 * xpts
 
     out = df[["player_id","web_name","position","team_id","team_name","cost","status"]].copy()
     out["starter_prob"] = starter_prob.clip(0.0, 1.0)
