@@ -110,9 +110,6 @@ def _scrape_bettingodds_match(url: str) -> Optional[Tuple[str, str, float, float
         return None
 
 def fetch_match_odds(teams_df: pd.DataFrame, sleep_between: float = 0.2) -> pd.DataFrame:
-    """
-    Free odds fetcher (best-effort). Returns columns: team_name, win_prob, over25_prob (over25 may be 0).
-    """
     team_names = [str(x) for x in teams_df.get("team_name", []) if pd.notna(x)]
     out_rows: List[Dict] = []
 
@@ -120,7 +117,6 @@ def fetch_match_odds(teams_df: pd.DataFrame, sleep_between: float = 0.2) -> pd.D
         alias = _alias(team)
         row = None
 
-        # OddsPortal search & scrape
         url = _search_ddg(f"{alias} odds site:oddsportal.com")
         if url:
             parsed = _scrape_oddsportal_match(url)
@@ -135,7 +131,6 @@ def fetch_match_odds(teams_df: pd.DataFrame, sleep_between: float = 0.2) -> pd.D
                 win_prob = probs.get(alias, probs.get(team, 0.0))
                 row = {"team_name": team, "win_prob": float(win_prob), "over25_prob": 0.0}
 
-        # BettingOdds.com as fallback
         if row is None:
             link = _search_ddg(f"{alias} odds site:bettingodds.com")
             if link:
