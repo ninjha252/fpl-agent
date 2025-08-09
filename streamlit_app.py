@@ -14,60 +14,77 @@ from src.fpl_agent.projections import expected_points_next_gw
 from src.fpl_agent.optimizer import SquadOptimizer
 from src.fpl_agent.utils import SquadRules
 
-# knobs & buzz
+# module knobs live in projections
 from src.fpl_agent import projections as proj_mod
-from src.fpl_agent import news_state
-from src.fpl_agent.news_signals import build_buzz_map
 
-# Optional FREE odds (best-effort; can be toggled off)
-from src.fpl_agent.odds_adapter_free import fetch_match_odds as fetch_odds_free
+# ---------- small UI helpers ----------
+def safe_info(msg: str):
+    # avoid crashing if Streamlit session tears down while sending a message
+    try:
+        st.info(msg)
+    except Exception:
+        pass
 
-# ---------------- UI CONFIG ----------------
-st.set_page_config(page_title="FPL AI Agent", layout="wide")
-st.title("🏆 FPL AI Agent – MVP (faster)")
-
-# --------- helpers ---------
 def safe_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
     return [c for c in cols if c in df.columns]
 
+# ---------- caching wrappers (no Streamlit calls inside) ----------
 @st.cache_data(ttl=1800)  # 30 minutes
 def _get_fpl_data():
     players, teams, events = load_bootstrap()
     fixtures = load_fixtures()
     return players, teams, events, fixtures
 
-@st.cache_data(ttl=900)  # 15 minutes
+@st.cache_data(ttl=900)   # 15 minutes
 def _get_free_odds(teams_df: pd.DataFrame):
     try:
-        return fetch_odds_free(teams_df[["team_id", "team_name"]])
+        from src.fpl_agent.odds_adapter_free import fetch_match_odds
+        return fetch_match_odds(teams_df[["team_id", "team_name"]])
     except Exception:
         return pd.DataFrame()
 
-@st.cache_data(ttl=900)  # 15 minutes
+@st.cache_data(ttl=900)   # 15 minutes
 def _get_buzz(names: list[str], subs: list[str], secrets: dict):
     try:
+        from src.fpl_agent.news_signals import build_buzz_map
         return build_buzz_map(secrets, names, reddit_subs=subs)
     except Exception:
         return {}
 
-@st.cache_data(ttl=900)  # 15 minutes
+@st.cache_data(ttl=900)   # 15 minutes
 def _compute_proj(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame,
                   nailedness: float, hide_thresh: float, form_n: int,
                   odds_w: float, buzz_w: float,
+                  manual_backups: list[str],
                   odds_df: pd.DataFrame | None, buzz_map: dict | None):
-    # set knobs (kept module-level for simplicity)
+    # set knobs (module-level state)
     proj_mod.set_nailedness_scale(nailedness)
     proj_mod.set_starter_hide_threshold(hide_thresh)
     proj_mod.set_form_lookback(form_n)
     proj_mod.set_odds_weight(odds_w)
     proj_mod.NEWS_BUZZ_WEIGHT = buzz_w
+    for name in manual_backups:
+        if name:
+            proj_mod.set_manual_role_override(name, "backup")
 
-    # pass optional odds/buzz directly so projections doesn’t scrape
-    df = expected_points_next_gw(players, teams, fixtures, odds_df=odds_df, buzz_map=buzz_map)
+    # IMPORTANT: expected_points_next_gw signature must accept odds_df, buzz_map
+    df = expected_points_next_gw(
+        players, teams, fixtures,
+        odds_df=odds_df,         # None or DataFrame
+        buzz_map=buzz_map        # None or dict
+    )
     return df
 
-# ---------------- SIDEBAR ----------------
+# ---------------- UI CONFIG ----------------
+st.set_page_config(page_title="FPL AI Agent (fast)", layout="wide")
+st.title("🏆 FPL AI Agent — fast build")
+
 with st.sidebar:
+    # cache reset
+    if st.button("🧹 Clear cache"):
+        st.cache_data.clear()
+        st.success("Cache cleared. Click any control to rerun.")
+
     st.header("Settings")
     budget = st.number_input("Initial Budget (for new squad)", 95.0, 110.0, 100.0, 0.5)
     mode = st.radio("Mode", ["Build initial 15", "Optimize my 15"], horizontal=True)
@@ -75,62 +92,58 @@ with st.sidebar:
     st.markdown("### Starters & penalties")
     nailedness = st.slider("Nailedness scale", 0.5, 1.5, 1.0, 0.05)
     hide_thresh = st.slider("Hide backups below prob", 0.0, 0.8, 0.35, 0.05)
-    manual_backups = st.text_input("Manual backups (comma-separated)", "Arrizabalaga,Kepa")
+    manual_backups_text = st.text_input("Manual backups (comma-separated)", "Arrizabalaga,Kepa")
+    manual_backups = [s.strip() for s in manual_backups_text.split(",") if s.strip()]
 
     st.markdown("### Form & Odds")
     form_n = st.slider("Form lookback (games)", 3, 10, 6, 1)
-    odds_on = st.checkbox("Use FREE bookmaker odds (experimental)", value=False)  # optional
+    odds_on = st.checkbox("Use FREE bookmaker odds (experimental)", value=False)
     odds_w = st.slider("Odds weight", 0.0, 1.5, 0.6, 0.05)
 
     st.markdown("### News & Buzz")
     use_buzz = st.checkbox("Incorporate Reddit & news buzz", value=False)
     buzz_weight = st.slider("Buzz weight added to xPts", 0.0, 1.5, 0.5, 0.05)
-    subs_text = st.text_input(
-        "Subreddits (comma-separated)",
-        "FantasyPL,FantasyPremierLeague,PremierLeague,soccer"
-    )
+    subs_text = st.text_input("Subreddits (comma-separated)",
+                              "FantasyPL,FantasyPremierLeague,PremierLeague,soccer")
     subs = [s.strip() for s in subs_text.split(",") if s.strip()]
 
-st.info(
-    "Faster build: heavy stuff is cached; odds & buzz are optional. "
-    "XI obeys FPL rules (1 GK, ≥3 DEF, ≥3 MID, ≥1 FWD)."
-)
+st.info("Fast path: base FPL data cached 30m. Odds/news are optional and cached 15m. "
+        "XI rules: 1 GK, ≥3 DEF, ≥3 MID, ≥1 FWD.")
 
-# ---------------- LOAD DATA (cached) ----------------
-with st.spinner("Loading FPL data..."):
+# ---------------- LOAD FPL DATA ----------------
+with st.spinner("Loading FPL data…"):
     players, teams, events, fixtures = _get_fpl_data()
 
-# manual backup overrides
-for name in [n.strip() for n in manual_backups.split(",") if n.strip()]:
-    proj_mod.set_manual_role_override(name, "backup")
-
-# Optional buzz (cached)
+# -------- optional & cached: buzz/odds --------
 buzz_map = {}
 if use_buzz:
-    st.toast("Fetching buzz…", icon="📰")
+    safe_info("Fetching buzz…")
     names = players["web_name"].astype(str).tolist()
     buzz_map = _get_buzz(names, subs, st.secrets)
 
-# Optional free odds (cached)
 free_odds_df = pd.DataFrame()
 if odds_on:
     with st.spinner("Fetching free odds (best-effort)…"):
         free_odds_df = _get_free_odds(teams)
 
-# ---------------- PROJECTIONS (cached) ----------------
+# ---------------- PROJECTIONS ----------------
 proj = _compute_proj(
     players, teams, fixtures,
     nailedness=nailedness, hide_thresh=hide_thresh, form_n=form_n,
     odds_w=odds_w, buzz_w=buzz_weight,
-    odds_df=free_odds_df if odds_on else None,
-    buzz_map=buzz_map if use_buzz else None
+    manual_backups=manual_backups,
+    odds_df=(free_odds_df if odds_on else None),
+    buzz_map=(buzz_map if use_buzz else None),
 )
 
-# Merge odds into display (nice to see, even if weights used internally)
+# show odds columns even if projections used them internally
 if odds_on and not free_odds_df.empty and "team_name" in proj.columns:
-    proj = proj.merge(free_odds_df, on="team_name", how="left")
+    try:
+        proj = proj.merge(free_odds_df, on="team_name", how="left")
+    except Exception:
+        pass
 
-# Hide obvious backups from table view if desired
+# hide backups in table view
 if hide_thresh > 0 and "starter_prob" in proj.columns:
     proj = proj[proj["starter_prob"] >= hide_thresh].copy()
 
@@ -272,6 +285,6 @@ else:
 
 st.divider()
 st.caption(
-    "Speed tips: odds/news are cached & optional. Changing sliders invalidates only what’s needed; "
-    "base FPL data is reused for 30 min."
+    "Speed tips: keep odds/news off unless needed. Cached data avoids rework. "
+    "If things get weird, use ‘Clear cache’ above."
 )
