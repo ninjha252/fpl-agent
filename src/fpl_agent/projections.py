@@ -8,13 +8,13 @@ NAILEDNESS_SCALE: float = 1.0
 STARTER_HIDE_THRESHOLD: float = 0.35
 GK_BACKUP_MULT: float = 0.10
 BACKUP_MULT: float = 0.25
-NEWS_BUZZ_WEIGHT: float = 0.5
+NEWS_BUZZ_WEIGHT: float = 0.2
 FORM_LOOKBACK: int = 6
-ODDS_WEIGHT: float = 0.6
+ODDS_WEIGHT: float = 0.4
 
 MANUAL_ROLE_OVERRIDES: Dict[str, str] = {"Arrizabalaga":"backup","Kepa":"backup"}
 
-ROLE_W = {"GK": 0.65, "DEF": 0.80, "MID": 1.00, "FWD": 1.05}
+ROLE_W = {"GK": 0.60, "DEF": 0.75, "MID": 0.95, "FWD": 1.00}
 TEAM_KEYS = [
     "strength_overall_home", "strength_overall_away",
     "strength_attack_home",  "strength_attack_away",
@@ -157,13 +157,12 @@ def expected_points_next_gw(
     opp_strength = team_strength.add_suffix("_opp").rename(columns={"team_id_opp": "opp_id"})
     df = df.merge(opp_strength, on="opp_id", how="left")
 
-    # Optional bookmaker odds: merge, don't fetch
-    if isinstance(odds_df, pd.DataFrame) and not odds_df.empty and "team_name" in teams.columns:
+    # Team names & optional odds
+    if "team_name" in teams.columns:
         df = df.merge(teams[["team_id","team_name"]], on="team_id", how="left")
+    if isinstance(odds_df, pd.DataFrame) and not odds_df.empty:
         df = df.merge(odds_df, on="team_name", how="left")
     else:
-        if "team_name" in teams.columns:
-            df = df.merge(teams[["team_id","team_name"]], on="team_id", how="left")
         df["win_prob"] = 0.0
         df["over25_prob"] = 0.0
 
@@ -185,31 +184,32 @@ def expected_points_next_gw(
     opp_att = df[["strength_attack_home_opp", "strength_attack_away_opp"]].mean(axis=1)
     cs_proxy = (team_def - opp_att).clip(-2, 2) * df["position"].isin(["GK","DEF"]).astype(float)
 
-    # form features (scaled)
     form_ppg = df.get("form_ppg", pd.Series(0, index=df.index)).fillna(0.0)
     form_gf  = df.get("form_gf",  pd.Series(0, index=df.index)).fillna(0.0)
     form_ga  = df.get("form_ga",  pd.Series(0, index=df.index)).fillna(0.0)
     form_cs  = df.get("form_cs",  pd.Series(0, index=df.index)).fillna(0.0)
     form_adj = 0.4*form_ppg + 0.3*(form_gf - form_ga) + 0.3*form_cs
 
-    # odds features (if present)
     win_prob    = df.get("win_prob", pd.Series(0, index=df.index)).fillna(0.0)
     over25_prob = df.get("over25_prob", pd.Series(0, index=df.index)).fillna(0.0)
     odds_adj = ODDS_WEIGHT * (0.7*win_prob + 0.3*over25_prob)
 
     sel = pd.to_numeric(df["selected_by_percent"], errors="coerce").fillna(0.0)
     sel_norm = (sel - sel.min()) / ((sel.max() - sel.min()) or 1.0)
-    bonus_proxy = 0.1 * sel_norm
 
-    xpts = minutes_factor * (
-        role_w * (0.8 * ict_z) +
-        0.5 * fixture_adj +
-        0.35 * cs_proxy +
-        0.35 * form_adj +
-        odds_adj +
-        bonus_proxy
-    )
-    xpts = 2.0 + 1.0 * xpts
+    # --- toned-down blend ---
+    ict_term      = role_w * (0.6 * ict_z)
+    fixture_term  = 0.35 * fixture_adj
+    cs_term       = 0.30 * cs_proxy
+    form_term     = 0.30 * form_adj
+    odds_term     = odds_adj
+    pop_term      = 0.08 * sel_norm
+
+    raw = ict_term + fixture_term + cs_term + form_term + odds_term + pop_term
+    score = minutes_factor * raw
+    score = np.clip(score, -1.5, 4.0)  # clamp extremes
+
+    xpts = 2.5 + 1.2 * score
 
     out = df[["player_id","web_name","position","team_id","team_name","cost","status"]].copy()
     out["starter_prob"] = starter_prob.clip(0.0, 1.0)
@@ -221,7 +221,6 @@ def expected_points_next_gw(
     xpts = np.where(of_backup_mask, xpts * BACKUP_MULT, xpts)
     out["xPts"] = np.maximum(xpts, 0.0)
 
-    # integrate news buzz if provided
     if isinstance(buzz_map, dict) and buzz_map:
         out["buzz"] = out["web_name"].map(lambda n: buzz_map.get(str(n), 0.0))
         out["xPts"] = (out["xPts"] + NEWS_BUZZ_WEIGHT * out["buzz"]).clip(lower=0.0)
