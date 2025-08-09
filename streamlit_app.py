@@ -13,13 +13,10 @@ from src.fpl_agent.data import load_bootstrap, load_fixtures
 from src.fpl_agent.projections import expected_points_next_gw
 from src.fpl_agent.optimizer import SquadOptimizer
 from src.fpl_agent.utils import SquadRules
-
-# module knobs live in projections
 from src.fpl_agent import projections as proj_mod
 
 # ---------- small UI helpers ----------
 def safe_info(msg: str):
-    # avoid crashing if Streamlit session tears down while sending a message
     try:
         st.info(msg)
     except Exception:
@@ -57,7 +54,6 @@ def _compute_proj(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataF
                   odds_w: float, buzz_w: float,
                   manual_backups: list[str],
                   odds_df: pd.DataFrame | None, buzz_map: dict | None):
-    # set knobs (module-level state)
     proj_mod.set_nailedness_scale(nailedness)
     proj_mod.set_starter_hide_threshold(hide_thresh)
     proj_mod.set_form_lookback(form_n)
@@ -67,11 +63,10 @@ def _compute_proj(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataF
         if name:
             proj_mod.set_manual_role_override(name, "backup")
 
-    # IMPORTANT: expected_points_next_gw signature must accept odds_df, buzz_map
     df = expected_points_next_gw(
         players, teams, fixtures,
-        odds_df=odds_df,         # None or DataFrame
-        buzz_map=buzz_map        # None or dict
+        odds_df=odds_df,
+        buzz_map=buzz_map
     )
     return df
 
@@ -80,7 +75,6 @@ st.set_page_config(page_title="FPL AI Agent (fast)", layout="wide")
 st.title("🏆 FPL AI Agent — fast build")
 
 with st.sidebar:
-    # cache reset
     if st.button("🧹 Clear cache"):
         st.cache_data.clear()
         st.success("Cache cleared. Click any control to rerun.")
@@ -98,11 +92,11 @@ with st.sidebar:
     st.markdown("### Form & Odds")
     form_n = st.slider("Form lookback (games)", 3, 10, 6, 1)
     odds_on = st.checkbox("Use FREE bookmaker odds (experimental)", value=False)
-    odds_w = st.slider("Odds weight", 0.0, 1.5, 0.6, 0.05)
+    odds_w = st.slider("Odds weight", 0.0, 1.5, 0.4, 0.05)
 
     st.markdown("### News & Buzz")
     use_buzz = st.checkbox("Incorporate Reddit & news buzz", value=False)
-    buzz_weight = st.slider("Buzz weight added to xPts", 0.0, 1.5, 0.5, 0.05)
+    buzz_weight = st.slider("Buzz weight added to xPts", 0.0, 1.5, 0.2, 0.05)
     subs_text = st.text_input("Subreddits (comma-separated)",
                               "FantasyPL,FantasyPremierLeague,PremierLeague,soccer")
     subs = [s.strip() for s in subs_text.split(",") if s.strip()]
@@ -136,14 +130,12 @@ proj = _compute_proj(
     buzz_map=(buzz_map if use_buzz else None),
 )
 
-# show odds columns even if projections used them internally
 if odds_on and not free_odds_df.empty and "team_name" in proj.columns:
     try:
         proj = proj.merge(free_odds_df, on="team_name", how="left")
     except Exception:
         pass
 
-# hide backups in table view
 if hide_thresh > 0 and "starter_prob" in proj.columns:
     proj = proj[proj["starter_prob"] >= hide_thresh].copy()
 
