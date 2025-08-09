@@ -5,7 +5,6 @@ from typing import Dict, List, Tuple
 
 from .utils import SquadRules
 
-# --------- small utils ---------
 def _status_ok(prob: pl.LpProblem) -> bool:
     try:
         return pl.LpStatus[prob.status] == "Optimal"
@@ -13,9 +12,7 @@ def _status_ok(prob: pl.LpProblem) -> bool:
         return False
 
 def _normalize_position_series(s: pd.Series) -> pd.Series:
-    """Normalize position labels to GK/DEF/MID/FWD."""
     ss = s.astype(str).str.upper().str.strip()
-    # common variants
     ss = ss.replace(
         {
             "GKP": "GK",
@@ -28,12 +25,10 @@ def _normalize_position_series(s: pd.Series) -> pd.Series:
             "ATTACKER": "FWD",
         }
     )
-    # If someone passes numeric codes (1..4), map them
     ss = ss.replace({"1": "GK", "2": "DEF", "3": "MID", "4": "FWD"})
     return ss
 
 def _coerce_pool(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure required columns/dtypes and normalize positions."""
     need = {"player_id", "position", "team_id", "cost", "xPts"}
     missing = need - set(df.columns)
     if missing:
@@ -43,19 +38,15 @@ def _coerce_pool(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     out = df.copy()
-    # basic types
     out["player_id"] = pd.to_numeric(out["player_id"], errors="coerce").astype("Int64")
     out["team_id"]   = pd.to_numeric(out["team_id"],   errors="coerce").astype("Int64")
     out["cost"]      = pd.to_numeric(out["cost"],      errors="coerce").astype(float)
     out["xPts"]      = pd.to_numeric(out["xPts"],      errors="coerce").astype(float)
-    # ✅ fix: use .str.* for string ops
     out["position"]  = _normalize_position_series(out["position"])
 
     out = out.dropna(subset=["player_id", "team_id", "cost", "xPts"]).copy()
     out["player_id"] = out["player_id"].astype(int)
     out["team_id"]   = out["team_id"].astype(int)
-
-    # keep only known positions
     out = out[out["position"].isin(["GK", "DEF", "MID", "FWD"])].copy()
     if out.empty:
         raise ValueError("No valid players after position normalization.")
@@ -96,7 +87,6 @@ def _greedy_repair_squad(pool: pd.DataFrame, want: Dict[str, int], budget: float
 
 def _repair_xi_to_formation(xi: List[int], all_ids: List[int],
                             pos_map: Dict[int, str], xpts: Dict[int, float]) -> List[int]:
-    """Safe repair: enforce 1 GK, DEF>=3, MID>=3, FWD>=1, total=11 without shrinking below 11."""
     xi = list(dict.fromkeys(xi))
     if len(xi) < 11:
         for i in sorted(all_ids, key=lambda j: xpts[j], reverse=True):
@@ -116,11 +106,9 @@ def _repair_xi_to_formation(xi: List[int], all_ids: List[int],
     counts = recount()
     sorted_ids = sorted(all_ids, key=lambda i: xpts[i], reverse=True)
 
-    # exactly 1 GK
     while counts["GK"] > 1:
         repl = next((i for i in sorted_ids if pos_map[i] != "GK" and i not in xi), None)
-        if repl is None:
-            break
+        if repl is None: break
         gks = [j for j in xi if pos_map[j] == "GK"]
         worst_gk = min(gks, key=lambda j: xpts[j])
         xi.remove(worst_gk); xi.append(repl)
@@ -129,8 +117,7 @@ def _repair_xi_to_formation(xi: List[int], all_ids: List[int],
     while counts["GK"] < 1:
         add_gk = next((i for i in sorted_ids if pos_map[i] == "GK" and i not in xi), None)
         drop = min([j for j in xi if pos_map[j] != "GK"], key=lambda j: xpts[j], default=None)
-        if add_gk is None or drop is None:
-            break
+        if add_gk is None or drop is None: break
         xi.remove(drop); xi.append(add_gk)
         counts = recount()
 
@@ -140,14 +127,12 @@ def _repair_xi_to_formation(xi: List[int], all_ids: List[int],
         while counts.get(role, 0) < k and tries < 20:
             tries += 1
             cand = next((i for i in sorted_ids if pos_map[i] == role and i not in xi), None)
-            if cand is None:
-                break
+            if cand is None: break
             victims = []
             for r, rmin in (("DEF", 3), ("MID", 3), ("FWD", 1)):
                 if r != role and counts.get(r, 0) > rmin:
                     victims += [j for j in xi if pos_map[j] == r]
-            if not victims:
-                break
+            if not victims: break
             worst = min(victims, key=lambda j: xpts[j])
             xi.remove(worst); xi.append(cand)
             counts = recount()
@@ -172,11 +157,9 @@ class SquadOptimizer:
     def __init__(self, rules: SquadRules):
         self.rules = rules
 
-    # ---------- building 15 ----------
     def pick_initial_squad(self, pool: pd.DataFrame) -> Dict[str, List[int]]:
         pool = _coerce_pool(pool)
 
-        # Cap candidates per position for speed on small CPUs
         caps = {"GK": 20, "DEF": 80, "MID": 100, "FWD": 60}
         sub = []
         for pos, cap in caps.items():
@@ -213,7 +196,6 @@ class SquadOptimizer:
         xi, bench, captain, vice = self._pick_xi_captain(sub_pool)
         return {"squad15": chosen, "xi": xi, "bench": bench, "captain": captain, "vice": vice}
 
-    # ---------- legal XI ----------
     def _pick_xi_captain(self, squad15: pd.DataFrame) -> Tuple[List[int], List[int], int, int]:
         s15 = _coerce_pool(squad15)
         ids = s15.player_id.tolist()
@@ -255,12 +237,11 @@ class SquadOptimizer:
         vice = max([i for i in xi if i != captain] or xi, key=lambda i: xpts[i])
         return xi, bench, int(captain), int(vice)
 
-    # ---------- transfer suggester ----------
     def _xi_points(self, squad_df: pd.DataFrame) -> float:
         xi, _, cap, _ = self._pick_xi_captain(squad_df)
         x = squad_df[squad_df.player_id.isin(xi)]["xPts"].sum()
         xc = float(squad_df.loc[squad_df.player_id == cap, "xPts"].iloc[0])
-        return float(x + xc)  # rough captain boost
+        return float(x + xc)
 
     def suggest_transfers(
         self,
@@ -277,7 +258,6 @@ class SquadOptimizer:
         if len(squad) != 15:
             raise ValueError("Provide exactly 15 players from your current squad.")
 
-        # limit candidate pool per position for speed
         caps = {"GK": 30, "DEF": 80, "MID": 100, "FWD": 70}
         pool_limited = []
         for pos, cap in caps.items():
@@ -296,7 +276,6 @@ class SquadOptimizer:
             best = None
             best_gain = 0.0
 
-            # Try replacing weakest players first to prune search
             for _, row_out in squad.sort_values("xPts").iterrows():
                 pos = row_out["position"]
                 out_id = int(row_out["player_id"])
@@ -319,7 +298,6 @@ class SquadOptimizer:
                         continue
 
                     tmp = squad.copy()
-                    # copy common metadata if present
                     tmp.loc[tmp.player_id == out_id, ["player_id","team_id","cost","xPts","position","web_name","team_name"]] = [
                         in_id, in_team, in_cost, float(row_in["xPts"]), pos,
                         str(row_in.get("web_name", in_id)),
