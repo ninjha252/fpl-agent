@@ -24,12 +24,53 @@ from src.fpl_agent.odds_adapter_free import fetch_match_odds as fetch_odds_free
 
 # ---------------- UI CONFIG ----------------
 st.set_page_config(page_title="FPL AI Agent", layout="wide")
-st.title("🏆 FPL AI Agent – MVP")
+st.title("🏆 FPL AI Agent – MVP (faster)")
 
+# --------- helpers ---------
+def safe_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
+    return [c for c in cols if c in df.columns]
+
+@st.cache_data(ttl=1800)  # 30 minutes
+def _get_fpl_data():
+    players, teams, events = load_bootstrap()
+    fixtures = load_fixtures()
+    return players, teams, events, fixtures
+
+@st.cache_data(ttl=900)  # 15 minutes
+def _get_free_odds(teams_df: pd.DataFrame):
+    try:
+        return fetch_odds_free(teams_df[["team_id", "team_name"]])
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=900)  # 15 minutes
+def _get_buzz(names: list[str], subs: list[str], secrets: dict):
+    try:
+        return build_buzz_map(secrets, names, reddit_subs=subs)
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=900)  # 15 minutes
+def _compute_proj(players: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame,
+                  nailedness: float, hide_thresh: float, form_n: int,
+                  odds_w: float, buzz_w: float,
+                  odds_df: pd.DataFrame | None, buzz_map: dict | None):
+    # set knobs (kept module-level for simplicity)
+    proj_mod.set_nailedness_scale(nailedness)
+    proj_mod.set_starter_hide_threshold(hide_thresh)
+    proj_mod.set_form_lookback(form_n)
+    proj_mod.set_odds_weight(odds_w)
+    proj_mod.NEWS_BUZZ_WEIGHT = buzz_w
+
+    # pass optional odds/buzz directly so projections doesn’t scrape
+    df = expected_points_next_gw(players, teams, fixtures, odds_df=odds_df, buzz_map=buzz_map)
+    return df
+
+# ---------------- SIDEBAR ----------------
 with st.sidebar:
     st.header("Settings")
     budget = st.number_input("Initial Budget (for new squad)", 95.0, 110.0, 100.0, 0.5)
-    build_mode = st.radio("Mode", ["Build initial 15", "Optimize my 15"], horizontal=True)
+    mode = st.radio("Mode", ["Build initial 15", "Optimize my 15"], horizontal=True)
 
     st.markdown("### Starters & penalties")
     nailedness = st.slider("Nailedness scale", 0.5, 1.5, 1.0, 0.05)
@@ -38,7 +79,7 @@ with st.sidebar:
 
     st.markdown("### Form & Odds")
     form_n = st.slider("Form lookback (games)", 3, 10, 6, 1)
-    odds_on = st.checkbox("Use FREE bookmaker odds (experimental)", value=False)  # optional toggle
+    odds_on = st.checkbox("Use FREE bookmaker odds (experimental)", value=False)  # optional
     odds_w = st.slider("Odds weight", 0.0, 1.5, 0.6, 0.05)
 
     st.markdown("### News & Buzz")
@@ -51,56 +92,47 @@ with st.sidebar:
     subs = [s.strip() for s in subs_text.split(",") if s.strip()]
 
 st.info(
-    "Projections use official FPL data + starter probability, team form, optional FREE odds & news buzz. "
+    "Faster build: heavy stuff is cached; odds & buzz are optional. "
     "XI obeys FPL rules (1 GK, ≥3 DEF, ≥3 MID, ≥1 FWD)."
 )
 
-# ---------------- LOAD DATA ----------------
+# ---------------- LOAD DATA (cached) ----------------
 with st.spinner("Loading FPL data..."):
-    players, teams, events = load_bootstrap()
-    fixtures = load_fixtures()
+    players, teams, events, fixtures = _get_fpl_data()
 
-# ---------------- APPLY KNOBS ----------------
-proj_mod.set_nailedness_scale(nailedness)
-proj_mod.set_starter_hide_threshold(hide_thresh)
-proj_mod.set_form_lookback(form_n)
-proj_mod.set_odds_weight(odds_w)
-proj_mod.NEWS_BUZZ_WEIGHT = buzz_weight
-
-# Manual backups injection
+# manual backup overrides
 for name in [n.strip() for n in manual_backups.split(",") if n.strip()]:
     proj_mod.set_manual_role_override(name, "backup")
 
-# Buzz (optional)
-news_state.BUZZ = {}
+# Optional buzz (cached)
+buzz_map = {}
 if use_buzz:
     st.toast("Fetching buzz…", icon="📰")
     names = players["web_name"].astype(str).tolist()
-    news_state.BUZZ = build_buzz_map(st.secrets, names, reddit_subs=subs)
+    buzz_map = _get_buzz(names, subs, st.secrets)
 
-# FREE odds prefetch (optional, just to show in table; projections also try internally)
+# Optional free odds (cached)
+free_odds_df = pd.DataFrame()
 if odds_on:
     with st.spinner("Fetching free odds (best-effort)…"):
-        try:
-            st.session_state["_free_odds_df"] = fetch_odds_free(teams[["team_id","team_name"]])
-        except Exception:
-            st.session_state["_free_odds_df"] = pd.DataFrame()
-else:
-    st.session_state["_free_odds_df"] = pd.DataFrame()
+        free_odds_df = _get_free_odds(teams)
 
-# ---------------- PROJECTIONS ----------------
-proj = expected_points_next_gw(players, teams, fixtures)
+# ---------------- PROJECTIONS (cached) ----------------
+proj = _compute_proj(
+    players, teams, fixtures,
+    nailedness=nailedness, hide_thresh=hide_thresh, form_n=form_n,
+    odds_w=odds_w, buzz_w=buzz_weight,
+    odds_df=free_odds_df if odds_on else None,
+    buzz_map=buzz_map if use_buzz else None
+)
 
-# Merge free odds into display (even if projections used some odds internally)
-if isinstance(st.session_state.get("_free_odds_df"), pd.DataFrame) and not st.session_state["_free_odds_df"].empty:
-    proj = proj.merge(st.session_state["_free_odds_df"], on="team_name", how="left")
+# Merge odds into display (nice to see, even if weights used internally)
+if odds_on and not free_odds_df.empty and "team_name" in proj.columns:
+    proj = proj.merge(free_odds_df, on="team_name", how="left")
 
-if hide_thresh > 0:
-    sp = proj.get("starter_prob", 1.0)
-    proj = proj[sp >= hide_thresh].copy()
-
-def safe_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
-    return [c for c in cols if c in df.columns]
+# Hide obvious backups from table view if desired
+if hide_thresh > 0 and "starter_prob" in proj.columns:
+    proj = proj[proj["starter_prob"] >= hide_thresh].copy()
 
 # ---------------- SEARCH ----------------
 with st.expander("🔎 Search players / teams"):
@@ -132,7 +164,7 @@ st.dataframe(
 rules = SquadRules(budget=budget)
 opt = SquadOptimizer(rules)
 
-if build_mode == "Build initial 15":
+if mode == "Build initial 15":
     st.subheader("Initial Squad Builder")
     pool = proj.copy()
     if "status" in pool.columns:
@@ -166,14 +198,15 @@ else:
     st.caption("Paste your **15 player IDs** (comma-separated). Use the `player_id` column from the table above.")
     ids_text = st.text_area("Your 15 player IDs", "")
 
-    with st.expander("⚙️ Transfer settings"):
+    action = st.radio("Choose action", ["Best XI", "Suggest transfers"], horizontal=True)
+
+    with st.expander("⚙️ Transfer settings (used for Suggest transfers)"):
         bank = st.number_input("Bank (£m)", min_value=0.0, max_value=20.0, value=0.0, step=0.1)
         free_transfers = st.number_input("Free transfers", min_value=0, max_value=8, value=1, step=1)
         max_changes = st.number_input("Max changes to consider", min_value=1, max_value=15, value=2, step=1)
         hit_cost = st.number_input("Hit cost per extra transfer", min_value=0, max_value=8, value=4, step=1)
 
-    cols = st.columns(2)
-    with cols[0]:
+    if action == "Best XI":
         if st.button("Optimize XI + C/VC"):
             try:
                 ids = [int(x.strip()) for x in ids_text.split(",") if x.strip()]
@@ -187,20 +220,20 @@ else:
                 xi_cols = safe_cols(xi_df, ["web_name", "position", "team_name", "cost", "xPts"])
                 bench_cols = safe_cols(bench_df, ["web_name", "position", "team_name", "cost", "xPts"])
 
-                sub1, sub2 = st.columns(2)
-                with sub1:
+                col1, col2 = st.columns(2)
+                with col1:
                     st.markdown("### Starting XI + C/VC")
                     st.dataframe(xi_df[xi_cols], use_container_width=True)
                     cap = chosen[chosen.player_id == captain].iloc[0]
                     v = chosen[chosen.player_id == vice].iloc[0]
                     st.success(f"Captain: {cap.web_name} | Vice: {v.web_name}")
-                with sub2:
+                with col2:
                     st.markdown("### Bench")
                     st.dataframe(bench_df[bench_cols], use_container_width=True)
             except Exception as e:
                 st.error(str(e))
 
-    with cols[1]:
+    else:
         if st.button("💹 Suggest transfers"):
             try:
                 ids = [int(x.strip()) for x in ids_text.split(",") if x.strip()]
@@ -209,7 +242,7 @@ else:
 
                 result = opt.suggest_transfers(
                     current15=current,
-                    pool=proj,  # allow any player
+                    pool=proj,
                     bank=float(bank),
                     max_changes=int(max_changes),
                     free_transfers=int(free_transfers),
@@ -238,9 +271,7 @@ else:
                 st.error(str(e))
 
 st.divider()
-st.markdown(
-    "#### Notes\n"
-    "- **Odds** are optional and free-scraped; turn off if flaky.\n"
-    "- **Suggest transfers** recomputes your XI after every candidate swap and subtracts hits.\n"
-    "- Team cap (3/club), budget, and position counts are respected.\n"
+st.caption(
+    "Speed tips: odds/news are cached & optional. Changing sliders invalidates only what’s needed; "
+    "base FPL data is reused for 30 min."
 )
